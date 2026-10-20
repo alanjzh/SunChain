@@ -1,0 +1,548 @@
+[workspace]
+members = [ "frame/base-fee", "frame/dynamic-fee", "frame/ethereum", "frame/evm", "frame/evm/precompile/sha3fips", "frame/evm/precompile/simple", "frame/evm/precompile/modexp", "frame/evm/precompile/ed25519", "frame/evm/precompile/bn128", "frame/evm/precompile/blake2", "frame/evm/precompile/bw6761", "frame/evm/precompile/bls12377", "frame/evm/precompile/bls12381", "frame/evm/precompile/dispatch", "frame/evm/precompile/curve25519", "frame/evm-chain-id", "frame/evm-polkavm", "frame/evm-polkavm/proc-macro", "frame/evm-polkavm/uapi", "frame/hotfix-sufficients", "client/api", "client/consensus", "client/rpc-core", "client/rpc", "client/rpc-v2", "client/rpc-v2/api", "client/rpc-v2/types", "client/db", "client/storage", "client/mapping-sync", "primitives/account", "primitives/consensus", "primitives/dynamic-fee", "primitives/evm", "primitives/rpc", "primitives/self-contained", "template/node", "template/runtime", "precompiles", "precompiles/macro", "precompiles/tests-external",]
+resolver = "2"
+
+[workspace.package]
+authors = [ "Frontier developers <legal@bitarray.dev>",]
+edition = "2021"
+repository = "https://github.com/polkadot-evm/frontier/"
+
+[workspace.dependencies]
+async-trait = "0.1"
+bitflags = "1.3.2"
+derive_more = "1.0"
+futures = "0.3.31"
+hex-literal = "0.4.1"
+impl-trait-for-tuples = "0.2.3"
+kvdb-rocksdb = "0.19.0"
+parity-db = "0.4.13"
+parking_lot = "0.12.3"
+proc-macro2 = "1.0.86"
+quote = "1.0.38"
+serde_json = "1.0"
+similar-asserts = "1.7.0"
+syn = "2.0.87"
+thiserror = "2.0"
+tokio = "1.45.0"
+
+[profile.release]
+panic = "unwind"
+
+[profile.production]
+inherits = "release"
+lto = true
+codegen-units = 1
+
+[workspace.dependencies.bn]
+package = "substrate-bn"
+version = "0.6"
+default-features = false
+
+[workspace.dependencies.clap]
+version = "4.5"
+features = [ "derive", "deprecated",]
+
+[workspace.dependencies.const-hex]
+version = "1.14"
+default-features = false
+features = [ "alloc",]
+
+[workspace.dependencies.environmental]
+version = "1.1.4"
+default-features = false
+
+[workspace.dependencies.ethereum]
+version = "0.18.2"
+default-features = false
+
+[workspace.dependencies.ethereum-types]
+version = "0.15"
+default-features = false
+
+[workspace.dependencies.evm]
+version = "0.43.2"
+default-features = false
+
+[workspace.dependencies.hash-db]
+version = "0.16.0"
+default-features = false
+
+[workspace.dependencies.hex]
+version = "0.4.3"
+default-features = false
+features = [ "alloc",]
+
+[workspace.dependencies.impl-serde]
+version = "0.5.0"
+default-features = false
+
+[workspace.dependencies.jsonrpsee]
+version = "0.24.9"
+
+[workspace.dependencies.jsonrpsee-core]
+version = "0.24.9"
+
+[workspace.dependencies.libsecp256k1]
+version = "0.7.2"
+default-features = false
+
+[workspace.dependencies.log]
+version = "0.4.27"
+default-features = false
+
+[workspace.dependencies.num_enum]
+version = "0.7.3"
+default-features = false
+
+[workspace.dependencies.rlp]
+version = "0.6"
+default-features = false
+
+[workspace.dependencies.scale-codec]
+package = "parity-scale-codec"
+version = "3.7.5"
+default-features = false
+features = [ "derive",]
+
+[workspace.dependencies.scale-info]
+version = "2.11.6"
+default-features = false
+features = [ "derive",]
+
+[workspace.dependencies.serde]
+version = "1.0"
+default-features = false
+features = [ "derive", "alloc",]
+
+[workspace.dependencies.sqlx]
+version = "0.7.4"
+default-features = false
+features = [ "macros",]
+
+[workspace.dependencies.sc-basic-authorship]
+path = "third_party/polkadot-sdk/substrate/client/basic-authorship"
+
+[workspace.dependencies.sc-block-builder]
+path = "third_party/polkadot-sdk/substrate/client/block-builder"
+
+[workspace.dependencies.sc-chain-spec]
+path = "third_party/polkadot-sdk/substrate/client/chain-spec"
+
+[workspace.dependencies.sc-cli]
+default-features = false
+path = "third_party/polkadot-sdk/substrate/client/cli"
+
+[workspace.dependencies.sc-client-api]
+path = "third_party/polkadot-sdk/substrate/client/api"
+
+[workspace.dependencies.sc-client-db]
+default-features = false
+path = "third_party/polkadot-sdk/substrate/client/db"
+
+[workspace.dependencies.sc-consensus]
+path = "third_party/polkadot-sdk/substrate/client/consensus/common"
+
+[workspace.dependencies.sc-consensus-aura]
+path = "third_party/polkadot-sdk/substrate/client/consensus/aura"
+
+[workspace.dependencies.sc-consensus-grandpa]
+path = "third_party/polkadot-sdk/substrate/client/consensus/grandpa"
+
+[workspace.dependencies.sc-consensus-manual-seal]
+path = "third_party/polkadot-sdk/substrate/client/consensus/manual-seal"
+
+[workspace.dependencies.sc-executor]
+path = "third_party/polkadot-sdk/substrate/client/executor"
+
+[workspace.dependencies.sc-keystore]
+path = "third_party/polkadot-sdk/substrate/client/keystore"
+
+[workspace.dependencies.sc-network]
+path = "third_party/polkadot-sdk/substrate/client/network"
+
+[workspace.dependencies.sc-network-common]
+path = "third_party/polkadot-sdk/substrate/client/network/common"
+
+[workspace.dependencies.sc-network-sync]
+path = "third_party/polkadot-sdk/substrate/client/network/sync"
+
+[workspace.dependencies.sc-offchain]
+path = "third_party/polkadot-sdk/substrate/client/offchain"
+
+[workspace.dependencies.sc-rpc]
+path = "third_party/polkadot-sdk/substrate/client/rpc"
+
+[workspace.dependencies.sc-rpc-api]
+path = "third_party/polkadot-sdk/substrate/client/rpc-api"
+
+[workspace.dependencies.sc-service]
+default-features = false
+path = "third_party/polkadot-sdk/substrate/client/service"
+
+[workspace.dependencies.sc-telemetry]
+path = "third_party/polkadot-sdk/substrate/client/telemetry"
+
+[workspace.dependencies.sc-transaction-pool]
+path = "third_party/polkadot-sdk/substrate/client/transaction-pool"
+
+[workspace.dependencies.sc-transaction-pool-api]
+path = "third_party/polkadot-sdk/substrate/client/transaction-pool/api"
+
+[workspace.dependencies.sc-utils]
+path = "third_party/polkadot-sdk/substrate/client/utils"
+
+[workspace.dependencies.sp-api]
+default-features = false
+path = "third_party/polkadot-sdk/substrate/primitives/api"
+
+[workspace.dependencies.sp-block-builder]
+default-features = false
+path = "third_party/polkadot-sdk/substrate/primitives/block-builder"
+
+[workspace.dependencies.sp-blockchain]
+default-features = false
+path = "third_party/polkadot-sdk/substrate/primitives/blockchain"
+
+[workspace.dependencies.sp-consensus]
+default-features = false
+path = "third_party/polkadot-sdk/substrate/primitives/consensus/common"
+
+[workspace.dependencies.sp-consensus-aura]
+default-features = false
+path = "third_party/polkadot-sdk/substrate/primitives/consensus/aura"
+
+[workspace.dependencies.sp-consensus-grandpa]
+default-features = false
+path = "third_party/polkadot-sdk/substrate/primitives/consensus/grandpa"
+
+[workspace.dependencies.sp-core]
+default-features = false
+path = "third_party/polkadot-sdk/substrate/primitives/core"
+
+[workspace.dependencies.sp-crypto-hashing]
+default-features = false
+path = "third_party/polkadot-sdk/substrate/primitives/crypto/hashing"
+
+[workspace.dependencies.sp-database]
+default-features = false
+path = "third_party/polkadot-sdk/substrate/primitives/database"
+
+[workspace.dependencies.sp-externalities]
+default-features = false
+path = "third_party/polkadot-sdk/substrate/primitives/externalities"
+
+[workspace.dependencies.sp-genesis-builder]
+default-features = false
+path = "third_party/polkadot-sdk/substrate/primitives/genesis-builder"
+
+[workspace.dependencies.sp-inherents]
+default-features = false
+path = "third_party/polkadot-sdk/substrate/primitives/inherents"
+
+[workspace.dependencies.sp-io]
+default-features = false
+path = "third_party/polkadot-sdk/substrate/primitives/io"
+
+[workspace.dependencies.sp-keyring]
+default-features = false
+path = "third_party/polkadot-sdk/substrate/primitives/keyring"
+
+[workspace.dependencies.sp-offchain]
+default-features = false
+path = "third_party/polkadot-sdk/substrate/primitives/offchain"
+
+[workspace.dependencies.sp-runtime]
+default-features = false
+path = "third_party/polkadot-sdk/substrate/primitives/runtime"
+
+[workspace.dependencies.sp-runtime-interface]
+default-features = false
+path = "third_party/polkadot-sdk/substrate/primitives/runtime-interface"
+
+[workspace.dependencies.sp-session]
+default-features = false
+path = "third_party/polkadot-sdk/substrate/primitives/session"
+
+[workspace.dependencies.sp-state-machine]
+default-features = false
+path = "third_party/polkadot-sdk/substrate/primitives/state-machine"
+
+[workspace.dependencies.sp-std]
+default-features = false
+path = "third_party/polkadot-sdk/substrate/primitives/std"
+
+[workspace.dependencies.sp-storage]
+default-features = false
+path = "third_party/polkadot-sdk/substrate/primitives/storage"
+
+[workspace.dependencies.sp-timestamp]
+default-features = false
+path = "third_party/polkadot-sdk/substrate/primitives/timestamp"
+
+[workspace.dependencies.sp-transaction-pool]
+default-features = false
+path = "third_party/polkadot-sdk/substrate/primitives/transaction-pool"
+
+[workspace.dependencies.sp-trie]
+default-features = false
+path = "third_party/polkadot-sdk/substrate/primitives/trie"
+
+[workspace.dependencies.sp-version]
+default-features = false
+path = "third_party/polkadot-sdk/substrate/primitives/version"
+
+[workspace.dependencies.sp-weights]
+default-features = false
+path = "third_party/polkadot-sdk/substrate/primitives/weights"
+
+[workspace.dependencies.frame-benchmarking]
+default-features = false
+path = "third_party/polkadot-sdk/substrate/frame/benchmarking"
+
+[workspace.dependencies.frame-executive]
+default-features = false
+path = "third_party/polkadot-sdk/substrate/frame/executive"
+
+[workspace.dependencies.frame-support]
+default-features = false
+path = "third_party/polkadot-sdk/substrate/frame/support"
+
+[workspace.dependencies.frame-system]
+default-features = false
+path = "third_party/polkadot-sdk/substrate/frame/system"
+
+[workspace.dependencies.frame-system-benchmarking]
+default-features = false
+path = "third_party/polkadot-sdk/substrate/frame/system/benchmarking"
+
+[workspace.dependencies.frame-system-rpc-runtime-api]
+default-features = false
+path = "third_party/polkadot-sdk/substrate/frame/system/rpc/runtime-api"
+
+[workspace.dependencies.pallet-aura]
+default-features = false
+path = "third_party/polkadot-sdk/substrate/frame/aura"
+
+[workspace.dependencies.pallet-balances]
+default-features = false
+path = "third_party/polkadot-sdk/substrate/frame/balances"
+
+[workspace.dependencies.pallet-grandpa]
+default-features = false
+path = "third_party/polkadot-sdk/substrate/frame/grandpa"
+
+[workspace.dependencies.pallet-sudo]
+default-features = false
+path = "third_party/polkadot-sdk/substrate/frame/sudo"
+
+[workspace.dependencies.pallet-timestamp]
+default-features = false
+path = "third_party/polkadot-sdk/substrate/frame/timestamp"
+
+[workspace.dependencies.pallet-transaction-payment]
+default-features = false
+path = "third_party/polkadot-sdk/substrate/frame/transaction-payment"
+
+[workspace.dependencies.pallet-transaction-payment-rpc]
+path = "third_party/polkadot-sdk/substrate/frame/transaction-payment/rpc"
+
+[workspace.dependencies.pallet-transaction-payment-rpc-runtime-api]
+default-features = false
+path = "third_party/polkadot-sdk/substrate/frame/transaction-payment/rpc/runtime-api"
+
+[workspace.dependencies.pallet-utility]
+default-features = false
+path = "third_party/polkadot-sdk/substrate/frame/utility"
+
+[workspace.dependencies.frame-benchmarking-cli]
+path = "third_party/polkadot-sdk/substrate/utils/frame/benchmarking-cli"
+
+[workspace.dependencies.prometheus-endpoint]
+package = "substrate-prometheus-endpoint"
+path = "third_party/polkadot-sdk/substrate/utils/prometheus"
+
+[workspace.dependencies.substrate-build-script-utils]
+path = "third_party/polkadot-sdk/substrate/utils/build-script-utils"
+
+[workspace.dependencies.substrate-frame-rpc-system]
+path = "third_party/polkadot-sdk/substrate/utils/frame/rpc/system"
+
+[workspace.dependencies.substrate-test-runtime-client]
+path = "third_party/polkadot-sdk/substrate/test-utils/runtime/client"
+
+[workspace.dependencies.substrate-wasm-builder]
+path = "third_party/polkadot-sdk/substrate/utils/wasm-builder"
+
+[workspace.dependencies.polkadot-runtime-common]
+default-features = false
+path = "third_party/polkadot-sdk/polkadot/runtime/common"
+
+[workspace.dependencies.cumulus-pallet-weight-reclaim]
+default-features = false
+path = "third_party/polkadot-sdk/cumulus/pallets/weight-reclaim"
+
+[workspace.dependencies.cumulus-primitives-proof-size-hostfunction]
+default-features = false
+path = "third_party/polkadot-sdk/cumulus/primitives/proof-size-hostfunction"
+
+[workspace.dependencies.cumulus-primitives-storage-weight-reclaim]
+default-features = false
+path = "third_party/polkadot-sdk/cumulus/primitives/storage-weight-reclaim"
+
+[workspace.dependencies.xcm]
+package = "staging-xcm"
+default-features = false
+path = "third_party/polkadot-sdk/polkadot/xcm"
+
+[workspace.dependencies.ark-bls12-377]
+version = "0.4.0"
+default-features = false
+features = [ "curve",]
+
+[workspace.dependencies.ark-bls12-381]
+version = "0.4.0"
+default-features = false
+features = [ "curve",]
+
+[workspace.dependencies.ark-bw6-761]
+version = "0.4.0"
+default-features = false
+
+[workspace.dependencies.ark-ec]
+version = "0.4.0"
+default-features = false
+
+[workspace.dependencies.ark-ff]
+version = "0.4.0"
+default-features = false
+
+[workspace.dependencies.ark-std]
+version = "0.4.0"
+default-features = false
+
+[workspace.dependencies.fc-api]
+path = "client/api"
+
+[workspace.dependencies.fc-cli]
+path = "client/cli"
+default-features = false
+
+[workspace.dependencies.fc-consensus]
+path = "client/consensus"
+
+[workspace.dependencies.fc-db]
+path = "client/db"
+default-features = false
+
+[workspace.dependencies.fc-mapping-sync]
+path = "client/mapping-sync"
+default-features = false
+
+[workspace.dependencies.fc-rpc]
+path = "client/rpc"
+default-features = false
+
+[workspace.dependencies.fc-rpc-core]
+path = "client/rpc-core"
+
+[workspace.dependencies.fc-rpc-v2]
+path = "client/rpc-v2"
+
+[workspace.dependencies.fc-rpc-v2-api]
+path = "client/rpc-v2/api"
+
+[workspace.dependencies.fc-rpc-v2-types]
+path = "client/rpc-v2/types"
+
+[workspace.dependencies.fc-storage]
+path = "client/storage"
+
+[workspace.dependencies.fp-account]
+path = "primitives/account"
+default-features = false
+
+[workspace.dependencies.fp-consensus]
+path = "primitives/consensus"
+default-features = false
+
+[workspace.dependencies.fp-dynamic-fee]
+path = "primitives/dynamic-fee"
+default-features = false
+
+[workspace.dependencies.fp-ethereum]
+path = "primitives/ethereum"
+default-features = false
+
+[workspace.dependencies.fp-evm]
+path = "primitives/evm"
+default-features = false
+
+[workspace.dependencies.fp-rpc]
+path = "primitives/rpc"
+default-features = false
+
+[workspace.dependencies.fp-self-contained]
+path = "primitives/self-contained"
+default-features = false
+
+[workspace.dependencies.fp-storage]
+path = "primitives/storage"
+default-features = false
+
+[workspace.dependencies.pallet-base-fee]
+path = "frame/base-fee"
+default-features = false
+
+[workspace.dependencies.pallet-dynamic-fee]
+path = "frame/dynamic-fee"
+default-features = false
+
+[workspace.dependencies.pallet-ethereum]
+path = "frame/ethereum"
+default-features = false
+
+[workspace.dependencies.pallet-evm]
+path = "frame/evm"
+default-features = false
+
+[workspace.dependencies.pallet-evm-chain-id]
+path = "frame/evm-chain-id"
+default-features = false
+
+[workspace.dependencies.pallet-evm-polkavm]
+path = "frame/evm-polkavm"
+default-features = false
+
+[workspace.dependencies.pallet-evm-polkavm-proc-macro]
+path = "frame/evm-polkavm/proc-macro"
+
+[workspace.dependencies.pallet-evm-polkavm-uapi]
+path = "frame/evm-polkavm/uapi"
+default-features = false
+
+[workspace.dependencies.pallet-evm-precompile-modexp]
+path = "frame/evm/precompile/modexp"
+default-features = false
+
+[workspace.dependencies.pallet-evm-precompile-sha3fips]
+path = "frame/evm/precompile/sha3fips"
+default-features = false
+
+[workspace.dependencies.pallet-evm-precompile-simple]
+path = "frame/evm/precompile/simple"
+default-features = false
+
+[workspace.dependencies.pallet-evm-test-vector-support]
+path = "frame/evm/test-vector-support"
+
+[workspace.dependencies.pallet-hotfix-sufficients]
+path = "frame/hotfix-sufficients"
+default-features = false
+
+[workspace.dependencies.precompile-utils]
+path = "precompiles"
+default-features = false
+
+[workspace.dependencies.frontier-template-runtime]
+path = "template/runtime"
+default-features = false

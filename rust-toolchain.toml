@@ -1,0 +1,4 @@
+[toolchain]
+# channel = "nightly"
+# channel = "1.84.1"
+channel = "nightly-2026-03-01"

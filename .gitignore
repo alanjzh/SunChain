@@ -1,0 +1,13 @@
+/target/
+/chain_data/
+/data/
+.idea/
+docker_build/temp
+/tmp/
+
+# Vendored crates: unreferenced by Cargo.toml (no path deps, no [patch], no
+# .cargo/config.toml), and 1.4G of the repository's bulk.
+/vendor/
+
+# Only holds stale copies of a cargo config.
+.cargo/

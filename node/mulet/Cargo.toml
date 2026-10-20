@@ -1,0 +1,9 @@
+[package]
+name = "mulet-binding"
+version = "0.0.1"
+authors.workspace = true
+description = "Bind Sunchain node start CMD to Mulet Interface."
+edition.workspace = true
+
+[build-dependencies]
+bindgen = "0.69.4"

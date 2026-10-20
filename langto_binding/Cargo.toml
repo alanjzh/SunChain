@@ -1,0 +1,49 @@
+[package]
+name = "langto_binding"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "sun_cred"
+crate-type = [
+    "staticlib",  # Ensure it gets compiled as a (static) C library
+    "cdylib",     # If you want a shared/dynamic C library (advanced)
+    "lib",        # For `generate-headers`, `examples/`, `tests/` etc.
+]
+
+[[bin]]
+name = "generate-headers"
+required-features = ["headers"]  # Do not build unless generating headers.
+
+[dependencies]
+# Use `cargo add` or `cargo search` to find the latest values of x.y.z.
+# For instance:
+#   cargo add safer-ffi
+# safer-ffi.version = "x.y.z"
+# safer-ffi.features = [] # you may add some later on.
+
+safer-ffi = "0.1.13"                # Write safer FFI code in Rust without polluting it with unsafe code
+# safer-ffi-gen = "0.9.2"             # FFI wrapper generator based on safer-ffi
+# safer-ffi-gen-macro = "0.9.2"       # Proc macro implementation for safer-ffi-gen
+# safer_ffi-proc_macro = "0.0.10"     # Procedural macro internals of `::safer_ffi`
+# safer_ffi-proc_macros = "0.1.13"    # Procedural macro internals of `::safer_ffi`
+
+sp-runtime = { workspace = true, features = ["std"] }
+sp-core = { workspace = true, features = ["std"] }
+
+hex = "0.4.3"
+subxt = "0.41.0"
+subxt-signer = "0.41.0"
+tokio = { version = "1.44.2", features = ["rt", "macros", "rt-multi-thread"] }
+reqwest = { version = "0.11", features = ["json"] }
+serde_json = "*"
+url.workspace = true
+openssl = { version = "0.10.73", features = ["vendored"] }
+
+[features]
+# default = [ "mcoklangto_data" ]
+# If you want to generate the headers, use a feature-gate
+# to opt into doing so:
+headers = ["safer-ffi/headers"]
+mcoklangto_data = []
+

@@ -1,0 +1,19 @@
+# 使用一个包含所需 glibc 和 libstdc++ 版本的较新基础镜像
+FROM ubuntu:24.04
+
+# 将本地的 sunchain_v1.6_bin 二进制文件复制到容器内的 / 目录下，并重命名为 sunchain
+COPY ./sunchain /sunchain
+
+# 复制启动脚本到镜像
+COPY start_sunchain.sh /start_sunchain.sh
+
+COPY evm_sunchain.json /evm_sunchain.json
+
+# 给二进制文件和脚本添加可执行权限
+RUN chmod +x /sunchain /start_sunchain.sh
+
+# 暴露 P2P 和 RPC 端口
+EXPOSE 16888/tcp 16888/udp 1688/tcp
+# 指定容器启动时要运行的命令
+CMD /start_sunchain.sh --no-telemetry --no-prometheus --unsafe-rpc-external --rpc-methods unsafe --rpc-cors all --kademlia-disjoint-query-paths --validator --rpc-port 1688
+

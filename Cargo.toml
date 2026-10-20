@@ -1,0 +1,964 @@
+[workspace.package]
+license = "MIT-0"
+authors = ["Onecloud Technologies "]
+homepage = "https://abc.onecloud.com"
+repository = "https://github.com/paritytech/polkadot-sdk-solochain-template.git"
+edition = "2021"
+
+[workspace]
+members = [
+    "node",
+    "admin",
+    "node/inspect",
+    "node/client/babe-consensus-data-provider",
+    "node/client/ecdsa-keyring",
+    # "node/node_state",
+    "node/mulet",
+    "pallets/template",
+    "pallets/exchange-core",
+    "pallets/exchange-primitives",
+    "pallets/insurance",
+    "pallets/liquidation",
+    "pallets/oracle",
+    "runtime",
+    "langto_binding",
+    # "sc-network",
+]
+resolver = "2"
+default-members = [
+  "node",
+  "node/inspect",
+  "node/client/babe-consensus-data-provider",
+  "node/client/ecdsa-keyring",
+  # "node/node_state",
+  "node/mulet",
+  "runtime",
+  "pallets/template",
+  "pallets/exchange-core",
+  "pallets/exchange-primitives",
+  "pallets/insurance",
+  "pallets/liquidation",
+  "pallets/oracle"
+]
+
+[workspace.dependencies]
+sunchain-runtime = { path = "./runtime", default-features = false }
+node-inspect = { path = "./node/inspect", default-features = false, package = "sunchain-node-inspect" }
+pallet-template = { path = "./pallets/template", default-features = false }
+pallet-exchange-core = { path = "./pallets/exchange-core", default-features = false }
+exchange-primitives = { path = "./pallets/exchange-primitives", default-features = false }
+pallet-insurance = { path = "./pallets/insurance", default-features = false }
+pallet-liquidation = { path = "./pallets/liquidation", default-features = false }
+pallet-oracle = { path = "./pallets/oracle", default-features = false }
+
+# path = "third_party/polkadot-sdk/..."
+asset-hub-rococo-emulated-chain = { path = "third_party/polkadot-sdk/cumulus/parachains/integration-tests/emulated/chains/parachains/assets/asset-hub-rococo" }
+asset-hub-rococo-runtime = { path = "third_party/polkadot-sdk/cumulus/parachains/runtimes/assets/asset-hub-rococo", default-features = false }
+asset-hub-westend-emulated-chain = { path = "third_party/polkadot-sdk/cumulus/parachains/integration-tests/emulated/chains/parachains/assets/asset-hub-westend" }
+asset-hub-westend-runtime = { path = "third_party/polkadot-sdk/cumulus/parachains/runtimes/assets/asset-hub-westend" }
+asset-test-utils = { path = "third_party/polkadot-sdk/cumulus/parachains/runtimes/assets/test-utils", default-features = false }
+assets-common = { path = "third_party/polkadot-sdk/cumulus/parachains/runtimes/assets/common", default-features = false }
+binary-merkle-tree = { path = "third_party/polkadot-sdk/substrate/utils/binary-merkle-tree", default-features = false }
+bp-asset-hub-rococo = { path = "third_party/polkadot-sdk/cumulus/parachains/runtimes/assets/asset-hub-rococo/bridge-primitives", default-features = false }
+bp-asset-hub-westend = { path = "third_party/polkadot-sdk/cumulus/parachains/runtimes/assets/asset-hub-westend/bridge-primitives", default-features = false }
+bp-beefy = { path = "third_party/polkadot-sdk/bridges/primitives/beefy", default-features = false }
+bp-bridge-hub-cumulus = { path = "third_party/polkadot-sdk/bridges/chains/chain-cumulus", default-features = false }
+bp-bridge-hub-rococo = { path = "third_party/polkadot-sdk/cumulus/parachains/runtimes/bridge-hubs/bridge-hub-rococo/bridge-primitives", default-features = false }
+bp-bridge-hub-westend = { path = "third_party/polkadot-sdk/cumulus/parachains/runtimes/bridge-hubs/bridge-hub-westend/bridge-primitives", default-features = false }
+bp-header-chain = { path = "third_party/polkadot-sdk/bridges/primitives/header-chain", default-features = false }
+bp-messages = { path = "third_party/polkadot-sdk/bridges/primitives/messages", default-features = false }
+bp-parachains = { path = "third_party/polkadot-sdk/bridges/primitives/parachains", default-features = false }
+bp-polkadot-bulletin = { path = "third_party/polkadot-sdk/bridges/chains/chain-polkadot-bulletin", default-features = false }
+bp-polkadot-core = { path = "third_party/polkadot-sdk/bridges/primitives/polkadot-core", default-features = false }
+bp-relayers = { path = "third_party/polkadot-sdk/bridges/primitives/relayers", default-features = false }
+bp-rococo = { path = "third_party/polkadot-sdk/polkadot/runtime/rococo/bridge-primitives", default-features = false }
+bp-runtime = { path = "third_party/polkadot-sdk/bridges/primitives/runtime", default-features = false }
+bp-test-utils = { path = "third_party/polkadot-sdk/bridges/primitives/test-utils", default-features = false }
+bp-westend = { path = "third_party/polkadot-sdk/polkadot/runtime/westend/bridge-primitives", default-features = false }
+bp-xcm-bridge-hub = { path = "third_party/polkadot-sdk/bridges/primitives/xcm-bridge-hub", default-features = false }
+bp-xcm-bridge-hub-router = { path = "third_party/polkadot-sdk/bridges/primitives/xcm-bridge-hub-router", default-features = false }
+bridge-hub-common = { path = "third_party/polkadot-sdk/cumulus/parachains/runtimes/bridge-hubs/common", default-features = false }
+bridge-hub-rococo-emulated-chain = { path = "third_party/polkadot-sdk/cumulus/parachains/integration-tests/emulated/chains/parachains/bridges/bridge-hub-rococo" }
+bridge-hub-rococo-runtime = { path = "third_party/polkadot-sdk/cumulus/parachains/runtimes/bridge-hubs/bridge-hub-rococo", default-features = false }
+bridge-hub-test-utils = { path = "third_party/polkadot-sdk/cumulus/parachains/runtimes/bridge-hubs/test-utils", default-features = false }
+bridge-hub-westend-emulated-chain = { path = "third_party/polkadot-sdk/cumulus/parachains/integration-tests/emulated/chains/parachains/bridges/bridge-hub-westend" }
+bridge-hub-westend-runtime = { path = "third_party/polkadot-sdk/cumulus/parachains/runtimes/bridge-hubs/bridge-hub-westend", default-features = false }
+bridge-runtime-common = { path = "third_party/polkadot-sdk/bridges/bin/runtime-common", default-features = false }
+chain-spec-builder = { path = "third_party/polkadot-sdk/substrate/bin/utils/chain-spec-builder", default-features = false, package = "staging-chain-spec-builder" }
+chain-spec-guide-runtime = { path = "third_party/polkadot-sdk/docs/sdk/src/reference_docs/chain_spec_runtime" }
+collectives-westend-emulated-chain = { path = "third_party/polkadot-sdk/cumulus/parachains/integration-tests/emulated/chains/parachains/collectives/collectives-westend" }
+collectives-westend-runtime = { path = "third_party/polkadot-sdk/cumulus/parachains/runtimes/collectives/collectives-westend" }
+coretime-rococo-emulated-chain = { path = "third_party/polkadot-sdk/cumulus/parachains/integration-tests/emulated/chains/parachains/coretime/coretime-rococo" }
+coretime-rococo-runtime = { path = "third_party/polkadot-sdk/cumulus/parachains/runtimes/coretime/coretime-rococo" }
+coretime-westend-emulated-chain = { path = "third_party/polkadot-sdk/cumulus/parachains/integration-tests/emulated/chains/parachains/coretime/coretime-westend" }
+coretime-westend-runtime = { path = "third_party/polkadot-sdk/cumulus/parachains/runtimes/coretime/coretime-westend" }
+cumulus-client-bootnodes = { path = "third_party/polkadot-sdk/cumulus/client/bootnodes", default-features = false }
+cumulus-client-cli = { path = "third_party/polkadot-sdk/cumulus/client/cli", default-features = false }
+cumulus-client-collator = { path = "third_party/polkadot-sdk/cumulus/client/collator", default-features = false }
+cumulus-client-consensus-aura = { path = "third_party/polkadot-sdk/cumulus/client/consensus/aura", default-features = false }
+cumulus-client-consensus-common = { path = "third_party/polkadot-sdk/cumulus/client/consensus/common", default-features = false }
+cumulus-client-consensus-proposer = { path = "third_party/polkadot-sdk/cumulus/client/consensus/proposer", default-features = false }
+cumulus-client-consensus-relay-chain = { path = "third_party/polkadot-sdk/cumulus/client/consensus/relay-chain", default-features = false }
+cumulus-client-network = { path = "third_party/polkadot-sdk/cumulus/client/network", default-features = false }
+cumulus-client-parachain-inherent = { path = "third_party/polkadot-sdk/cumulus/client/parachain-inherent", default-features = false }
+cumulus-client-pov-recovery = { path = "third_party/polkadot-sdk/cumulus/client/pov-recovery", default-features = false }
+cumulus-client-service = { path = "third_party/polkadot-sdk/cumulus/client/service", default-features = false }
+cumulus-pallet-aura-ext = { path = "third_party/polkadot-sdk/cumulus/pallets/aura-ext", default-features = false }
+cumulus-pallet-dmp-queue = { default-features = false, path = "third_party/polkadot-sdk/cumulus/pallets/dmp-queue" }
+cumulus-pallet-parachain-system = { path = "third_party/polkadot-sdk/cumulus/pallets/parachain-system", default-features = false }
+cumulus-pallet-parachain-system-proc-macro = { path = "third_party/polkadot-sdk/cumulus/pallets/parachain-system/proc-macro", default-features = false }
+cumulus-pallet-session-benchmarking = { path = "third_party/polkadot-sdk/cumulus/pallets/session-benchmarking", default-features = false }
+cumulus-pallet-solo-to-para = { path = "third_party/polkadot-sdk/cumulus/pallets/solo-to-para", default-features = false }
+cumulus-pallet-weight-reclaim = { path = "third_party/polkadot-sdk/cumulus/pallets/weight-reclaim", default-features = false }
+cumulus-pallet-xcm = { path = "third_party/polkadot-sdk/cumulus/pallets/xcm", default-features = false }
+cumulus-pallet-xcmp-queue = { path = "third_party/polkadot-sdk/cumulus/pallets/xcmp-queue", default-features = false }
+cumulus-ping = { path = "third_party/polkadot-sdk/cumulus/parachains/pallets/ping", default-features = false }
+cumulus-primitives-aura = { path = "third_party/polkadot-sdk/cumulus/primitives/aura", default-features = false }
+cumulus-primitives-core = { path = "third_party/polkadot-sdk/cumulus/primitives/core", default-features = false }
+cumulus-primitives-parachain-inherent = { path = "third_party/polkadot-sdk/cumulus/primitives/parachain-inherent", default-features = false }
+cumulus-primitives-proof-size-hostfunction = { path = "third_party/polkadot-sdk/cumulus/primitives/proof-size-hostfunction", default-features = false }
+cumulus-primitives-storage-weight-reclaim = { path = "third_party/polkadot-sdk/cumulus/primitives/storage-weight-reclaim", default-features = false }
+cumulus-primitives-timestamp = { path = "third_party/polkadot-sdk/cumulus/primitives/timestamp", default-features = false }
+cumulus-primitives-utility = { path = "third_party/polkadot-sdk/cumulus/primitives/utility", default-features = false }
+cumulus-relay-chain-inprocess-interface = { path = "third_party/polkadot-sdk/cumulus/client/relay-chain-inprocess-interface", default-features = false }
+cumulus-relay-chain-interface = { path = "third_party/polkadot-sdk/cumulus/client/relay-chain-interface", default-features = false }
+cumulus-relay-chain-minimal-node = { path = "third_party/polkadot-sdk/cumulus/client/relay-chain-minimal-node", default-features = false }
+cumulus-relay-chain-rpc-interface = { path = "third_party/polkadot-sdk/cumulus/client/relay-chain-rpc-interface", default-features = false }
+cumulus-relay-chain-streams = { path = "third_party/polkadot-sdk/cumulus/client/relay-chain-streams", default-features = false }
+cumulus-test-client = { path = "third_party/polkadot-sdk/cumulus/test/client" }
+cumulus-test-relay-sproof-builder = { path = "third_party/polkadot-sdk/cumulus/test/relay-sproof-builder", default-features = false }
+cumulus-test-runtime = { path = "third_party/polkadot-sdk/cumulus/test/runtime" }
+cumulus-test-service = { path = "third_party/polkadot-sdk/cumulus/test/service" }
+cumulus-zombienet-sdk-helpers = { path = "third_party/polkadot-sdk/cumulus/zombienet/zombienet-sdk-helpers", default-features = false }
+emulated-integration-tests-common = { path = "third_party/polkadot-sdk/cumulus/parachains/integration-tests/emulated/common", default-features = false }
+equivocation-detector = { path = "third_party/polkadot-sdk/bridges/relays/equivocation" }
+ethereum-standards = { path = "third_party/polkadot-sdk/substrate/primitives/ethereum-standards" }
+finality-relay = { path = "third_party/polkadot-sdk/bridges/relays/finality" }
+first-pallet = { package = "polkadot-sdk-docs-first-pallet", path = "third_party/polkadot-sdk/docs/sdk/packages/guides/first-pallet", default-features = false }
+first-runtime = { package = "polkadot-sdk-docs-first-runtime", path = "third_party/polkadot-sdk/docs/sdk/packages/guides/first-runtime", default-features = false }
+fork-tree = { path = "third_party/polkadot-sdk/substrate/utils/fork-tree", default-features = false }
+frame = { path = "third_party/polkadot-sdk/substrate/frame", default-features = false, package = "polkadot-sdk-frame" }
+frame-benchmarking = { path = "third_party/polkadot-sdk/substrate/frame/benchmarking", default-features = false }
+frame-benchmarking-cli = { path = "third_party/polkadot-sdk/substrate/utils/frame/benchmarking-cli", default-features = false }
+frame-benchmarking-pallet-pov = { default-features = false, path = "third_party/polkadot-sdk/substrate/frame/benchmarking/pov" }
+frame-election-provider-solution-type = { path = "third_party/polkadot-sdk/substrate/frame/election-provider-support/solution-type", default-features = false }
+frame-election-provider-support = { path = "third_party/polkadot-sdk/substrate/frame/election-provider-support", default-features = false }
+frame-executive = { path = "third_party/polkadot-sdk/substrate/frame/executive", default-features = false }
+frame-metadata-hash-extension = { path = "third_party/polkadot-sdk/substrate/frame/metadata-hash-extension", default-features = false }
+frame-storage-access-test-runtime = { path = "third_party/polkadot-sdk/substrate/utils/frame/storage-access-test-runtime", default-features = false }
+frame-support = { path = "third_party/polkadot-sdk/substrate/frame/support", default-features = false }
+frame-support-procedural = { path = "third_party/polkadot-sdk/substrate/frame/support/procedural", default-features = false }
+frame-support-procedural-tools = { path = "third_party/polkadot-sdk/substrate/frame/support/procedural/tools", default-features = false }
+frame-support-procedural-tools-derive = { path = "third_party/polkadot-sdk/substrate/frame/support/procedural/tools/derive", default-features = false }
+frame-support-test = { path = "third_party/polkadot-sdk/substrate/frame/support/test" }
+frame-system = { path = "third_party/polkadot-sdk/substrate/frame/system", default-features = false }
+frame-system-benchmarking = { path = "third_party/polkadot-sdk/substrate/frame/system/benchmarking", default-features = false }
+frame-system-rpc-runtime-api = { path = "third_party/polkadot-sdk/substrate/frame/system/rpc/runtime-api", default-features = false }
+frame-try-runtime = { path = "third_party/polkadot-sdk/substrate/frame/try-runtime", default-features = false }
+generate-bags = { path = "third_party/polkadot-sdk/substrate/utils/frame/generate-bags", default-features = false }
+glutton-westend-runtime = { path = "third_party/polkadot-sdk/cumulus/parachains/runtimes/glutton/glutton-westend" }
+gum = { path = "third_party/polkadot-sdk/polkadot/node/gum", default-features = false, package = "tracing-gum" }
+gum-proc-macro = { path = "third_party/polkadot-sdk/polkadot/node/gum/proc-macro", default-features = false, package = "tracing-gum-proc-macro" }
+kitchensink-runtime = { path = "third_party/polkadot-sdk/substrate/bin/node/runtime" }
+messages-relay = { path = "third_party/polkadot-sdk/bridges/relays/messages" }
+minimal-template-node = { path = "third_party/polkadot-sdk/templates/minimal/node" }
+minimal-template-runtime = { path = "third_party/polkadot-sdk/templates/minimal/runtime" }
+mmr-gadget = { path = "third_party/polkadot-sdk/substrate/client/merkle-mountain-range", default-features = false }
+mmr-rpc = { path = "third_party/polkadot-sdk/substrate/client/merkle-mountain-range/rpc", default-features = false }
+node-cli = { path = "third_party/polkadot-sdk/substrate/bin/node/cli", package = "staging-node-cli" }
+node-primitives = { path = "third_party/polkadot-sdk/substrate/bin/node/primitives", default-features = false }
+node-rpc = { path = "third_party/polkadot-sdk/substrate/bin/node/rpc" }
+node-testing = { path = "third_party/polkadot-sdk/substrate/bin/node/testing" }
+pallet-alliance = { path = "third_party/polkadot-sdk/substrate/frame/alliance", default-features = false }
+pallet-asset-conversion = { path = "third_party/polkadot-sdk/substrate/frame/asset-conversion", default-features = false }
+pallet-asset-conversion-ops = { path = "third_party/polkadot-sdk/substrate/frame/asset-conversion/ops", default-features = false }
+pallet-asset-conversion-tx-payment = { path = "third_party/polkadot-sdk/substrate/frame/transaction-payment/asset-conversion-tx-payment", default-features = false }
+pallet-asset-rate = { path = "third_party/polkadot-sdk/substrate/frame/asset-rate", default-features = false }
+pallet-asset-rewards = { path = "third_party/polkadot-sdk/substrate/frame/asset-rewards", default-features = false }
+pallet-asset-tx-payment = { path = "third_party/polkadot-sdk/substrate/frame/transaction-payment/asset-tx-payment", default-features = false }
+pallet-assets = { path = "third_party/polkadot-sdk/substrate/frame/assets", default-features = false }
+pallet-assets-freezer = { path = "third_party/polkadot-sdk/substrate/frame/assets-freezer", default-features = false }
+pallet-assets-holder = { path = "third_party/polkadot-sdk/substrate/frame/assets-holder", default-features = false }
+pallet-atomic-swap = { default-features = false, path = "third_party/polkadot-sdk/substrate/frame/atomic-swap" }
+pallet-aura = { path = "third_party/polkadot-sdk/substrate/frame/aura", default-features = false }
+pallet-authority-discovery = { path = "third_party/polkadot-sdk/substrate/frame/authority-discovery", default-features = false }
+pallet-authorship = { path = "third_party/polkadot-sdk/substrate/frame/authorship", default-features = false }
+pallet-babe = { path = "third_party/polkadot-sdk/substrate/frame/babe", default-features = false }
+pallet-bags-list = { path = "third_party/polkadot-sdk/substrate/frame/bags-list", default-features = false }
+pallet-bags-list-remote-tests = { path = "third_party/polkadot-sdk/substrate/frame/bags-list/remote-tests" }
+pallet-balances = { path = "third_party/polkadot-sdk/substrate/frame/balances", default-features = false }
+pallet-beefy = { path = "third_party/polkadot-sdk/substrate/frame/beefy", default-features = false }
+pallet-beefy-mmr = { path = "third_party/polkadot-sdk/substrate/frame/beefy-mmr", default-features = false }
+pallet-bounties = { path = "third_party/polkadot-sdk/substrate/frame/bounties", default-features = false }
+pallet-bridge-grandpa = { path = "third_party/polkadot-sdk/bridges/modules/grandpa", default-features = false }
+pallet-bridge-messages = { path = "third_party/polkadot-sdk/bridges/modules/messages", default-features = false }
+pallet-bridge-parachains = { path = "third_party/polkadot-sdk/bridges/modules/parachains", default-features = false }
+pallet-bridge-relayers = { path = "third_party/polkadot-sdk/bridges/modules/relayers", default-features = false }
+pallet-broker = { path = "third_party/polkadot-sdk/substrate/frame/broker", default-features = false }
+pallet-child-bounties = { path = "third_party/polkadot-sdk/substrate/frame/child-bounties", default-features = false }
+pallet-collator-selection = { path = "third_party/polkadot-sdk/cumulus/pallets/collator-selection", default-features = false }
+pallet-collective = { path = "third_party/polkadot-sdk/substrate/frame/collective", default-features = false }
+pallet-collective-content = { path = "third_party/polkadot-sdk/cumulus/parachains/pallets/collective-content", default-features = false }
+pallet-contracts = { path = "third_party/polkadot-sdk/substrate/frame/contracts", default-features = false }
+pallet-contracts-fixtures = { path = "third_party/polkadot-sdk/substrate/frame/contracts/fixtures", default-features = false }
+pallet-contracts-mock-network = { default-features = false, path = "third_party/polkadot-sdk/substrate/frame/contracts/mock-network" }
+pallet-contracts-proc-macro = { path = "third_party/polkadot-sdk/substrate/frame/contracts/proc-macro", default-features = false }
+pallet-contracts-uapi = { path = "third_party/polkadot-sdk/substrate/frame/contracts/uapi", default-features = false }
+pallet-conviction-voting = { path = "third_party/polkadot-sdk/substrate/frame/conviction-voting", default-features = false }
+pallet-core-fellowship = { path = "third_party/polkadot-sdk/substrate/frame/core-fellowship", default-features = false }
+pallet-default-config-example = { path = "third_party/polkadot-sdk/substrate/frame/examples/default-config", default-features = false }
+pallet-delegated-staking = { path = "third_party/polkadot-sdk/substrate/frame/delegated-staking", default-features = false }
+pallet-democracy = { path = "third_party/polkadot-sdk/substrate/frame/democracy", default-features = false }
+pallet-dev-mode = { path = "third_party/polkadot-sdk/substrate/frame/examples/dev-mode", default-features = false }
+pallet-dummy-dim = { path = "third_party/polkadot-sdk/substrate/frame/dummy-dim", default-features = false }
+pallet-election-provider-multi-block = { path = "third_party/polkadot-sdk/substrate/frame/election-provider-multi-block", default-features = false }
+pallet-election-provider-multi-phase = { path = "third_party/polkadot-sdk/substrate/frame/election-provider-multi-phase", default-features = false }
+pallet-election-provider-support-benchmarking = { path = "third_party/polkadot-sdk/substrate/frame/election-provider-support/benchmarking", default-features = false }
+pallet-elections-phragmen = { path = "third_party/polkadot-sdk/substrate/frame/elections-phragmen", default-features = false }
+pallet-example-authorization-tx-extension = { path = "third_party/polkadot-sdk/substrate/frame/examples/authorization-tx-extension", default-features = false }
+pallet-example-basic = { path = "third_party/polkadot-sdk/substrate/frame/examples/basic", default-features = false }
+pallet-example-frame-crate = { path = "third_party/polkadot-sdk/substrate/frame/examples/frame-crate", default-features = false }
+pallet-example-kitchensink = { path = "third_party/polkadot-sdk/substrate/frame/examples/kitchensink", default-features = false }
+pallet-example-mbm = { path = "third_party/polkadot-sdk/substrate/frame/examples/multi-block-migrations", default-features = false }
+pallet-example-offchain-worker = { path = "third_party/polkadot-sdk/substrate/frame/examples/offchain-worker", default-features = false }
+pallet-example-single-block-migrations = { path = "third_party/polkadot-sdk/substrate/frame/examples/single-block-migrations", default-features = false }
+pallet-example-split = { path = "third_party/polkadot-sdk/substrate/frame/examples/split", default-features = false }
+pallet-example-tasks = { path = "third_party/polkadot-sdk/substrate/frame/examples/tasks", default-features = false }
+pallet-example-view-functions = { path = "third_party/polkadot-sdk/substrate/frame/examples/view-functions", default-features = false }
+pallet-examples = { path = "third_party/polkadot-sdk/substrate/frame/examples" }
+pallet-fast-unstake = { path = "third_party/polkadot-sdk/substrate/frame/fast-unstake", default-features = false }
+pallet-glutton = { path = "third_party/polkadot-sdk/substrate/frame/glutton", default-features = false }
+pallet-grandpa = { path = "third_party/polkadot-sdk/substrate/frame/grandpa", default-features = false }
+pallet-identity = { path = "third_party/polkadot-sdk/substrate/frame/identity", default-features = false }
+pallet-im-online = { path = "third_party/polkadot-sdk/substrate/frame/im-online", default-features = false }
+pallet-indices = { path = "third_party/polkadot-sdk/substrate/frame/indices", default-features = false }
+pallet-insecure-randomness-collective-flip = { path = "third_party/polkadot-sdk/substrate/frame/insecure-randomness-collective-flip", default-features = false }
+pallet-lottery = { default-features = false, path = "third_party/polkadot-sdk/substrate/frame/lottery" }
+pallet-membership = { path = "third_party/polkadot-sdk/substrate/frame/membership", default-features = false }
+pallet-message-queue = { path = "third_party/polkadot-sdk/substrate/frame/message-queue", default-features = false }
+pallet-meta-tx = { path = "third_party/polkadot-sdk/substrate/frame/meta-tx", default-features = false }
+pallet-migrations = { path = "third_party/polkadot-sdk/substrate/frame/migrations", default-features = false }
+pallet-minimal-template = { path = "third_party/polkadot-sdk/templates/minimal/pallets/template", default-features = false }
+pallet-mixnet = { default-features = false, path = "third_party/polkadot-sdk/substrate/frame/mixnet" }
+pallet-mmr = { path = "third_party/polkadot-sdk/substrate/frame/merkle-mountain-range", default-features = false }
+pallet-multisig = { path = "third_party/polkadot-sdk/substrate/frame/multisig", default-features = false }
+pallet-nft-fractionalization = { path = "third_party/polkadot-sdk/substrate/frame/nft-fractionalization", default-features = false }
+pallet-nfts = { path = "third_party/polkadot-sdk/substrate/frame/nfts", default-features = false }
+pallet-nfts-runtime-api = { path = "third_party/polkadot-sdk/substrate/frame/nfts/runtime-api", default-features = false }
+pallet-nis = { path = "third_party/polkadot-sdk/substrate/frame/nis", default-features = false }
+pallet-node-authorization = { default-features = false, path = "third_party/polkadot-sdk/substrate/frame/node-authorization" }
+pallet-nomination-pools = { path = "third_party/polkadot-sdk/substrate/frame/nomination-pools", default-features = false }
+pallet-nomination-pools-benchmarking = { path = "third_party/polkadot-sdk/substrate/frame/nomination-pools/benchmarking", default-features = false }
+pallet-nomination-pools-runtime-api = { path = "third_party/polkadot-sdk/substrate/frame/nomination-pools/runtime-api", default-features = false }
+pallet-offences = { path = "third_party/polkadot-sdk/substrate/frame/offences", default-features = false }
+pallet-offences-benchmarking = { path = "third_party/polkadot-sdk/substrate/frame/offences/benchmarking", default-features = false }
+pallet-origin-restriction = { path = "third_party/polkadot-sdk/substrate/frame/origin-restriction", default-features = false }
+pallet-paged-list = { path = "third_party/polkadot-sdk/substrate/frame/paged-list", default-features = false }
+pallet-parachain-template = { path = "third_party/polkadot-sdk/templates/parachain/pallets/template", default-features = false }
+pallet-parameters = { path = "third_party/polkadot-sdk/substrate/frame/parameters", default-features = false }
+pallet-people = { path = "third_party/polkadot-sdk/substrate/frame/people", default-features = false }
+pallet-preimage = { path = "third_party/polkadot-sdk/substrate/frame/preimage", default-features = false }
+pallet-proxy = { path = "third_party/polkadot-sdk/substrate/frame/proxy", default-features = false }
+pallet-ranked-collective = { path = "third_party/polkadot-sdk/substrate/frame/ranked-collective", default-features = false }
+pallet-recovery = { path = "third_party/polkadot-sdk/substrate/frame/recovery", default-features = false }
+pallet-referenda = { path = "third_party/polkadot-sdk/substrate/frame/referenda", default-features = false }
+pallet-remark = { default-features = false, path = "third_party/polkadot-sdk/substrate/frame/remark" }
+pallet-revive = { path = "third_party/polkadot-sdk/substrate/frame/revive", default-features = false }
+pallet-revive-eth-rpc = { path = "third_party/polkadot-sdk/substrate/frame/revive/rpc", default-features = false }
+pallet-revive-fixtures = { path = "third_party/polkadot-sdk/substrate/frame/revive/fixtures", default-features = false }
+pallet-revive-proc-macro = { path = "third_party/polkadot-sdk/substrate/frame/revive/proc-macro", default-features = false }
+pallet-revive-uapi = { path = "third_party/polkadot-sdk/substrate/frame/revive/uapi", default-features = false }
+pallet-root-offences = { default-features = false, path = "third_party/polkadot-sdk/substrate/frame/root-offences" }
+pallet-root-testing = { path = "third_party/polkadot-sdk/substrate/frame/root-testing", default-features = false }
+pallet-safe-mode = { default-features = false, path = "third_party/polkadot-sdk/substrate/frame/safe-mode" }
+pallet-salary = { path = "third_party/polkadot-sdk/substrate/frame/salary", default-features = false }
+pallet-scheduler = { path = "third_party/polkadot-sdk/substrate/frame/scheduler", default-features = false }
+pallet-scored-pool = { default-features = false, path = "third_party/polkadot-sdk/substrate/frame/scored-pool" }
+pallet-session = { path = "third_party/polkadot-sdk/substrate/frame/session", features = ["historical"], default-features = false }
+pallet-session-benchmarking = { path = "third_party/polkadot-sdk/substrate/frame/session/benchmarking", default-features = false }
+pallet-skip-feeless-payment = { path = "third_party/polkadot-sdk/substrate/frame/transaction-payment/skip-feeless-payment", default-features = false }
+pallet-society = { path = "third_party/polkadot-sdk/substrate/frame/society", default-features = false }
+pallet-staking = { path = "third_party/polkadot-sdk/substrate/frame/staking", default-features = false }
+pallet-staking-async = { path = "third_party/polkadot-sdk/substrate/frame/staking-async", default-features = false }
+pallet-staking-async-ah-client = { path = "third_party/polkadot-sdk/substrate/frame/staking-async/ah-client", default-features = false }
+pallet-staking-async-parachain-runtime = { path = "third_party/polkadot-sdk/substrate/frame/staking-async/runtimes/parachain" }
+pallet-staking-async-rc-client = { path = "third_party/polkadot-sdk/substrate/frame/staking-async/rc-client", default-features = false }
+pallet-staking-async-rc-runtime = { path = "third_party/polkadot-sdk/substrate/frame/staking-async/runtimes/rc" }
+pallet-staking-async-rc-runtime-constants = { path = "third_party/polkadot-sdk/substrate/frame/staking-async/runtimes/rc/constants", default-features = false }
+pallet-staking-async-reward-curve = { path = "third_party/polkadot-sdk/substrate/frame/staking-async/reward-curve", default-features = false }
+pallet-staking-async-reward-fn = { path = "third_party/polkadot-sdk/substrate/frame/staking-async/reward-fn", default-features = false }
+pallet-staking-async-runtime-api = { path = "third_party/polkadot-sdk/substrate/frame/staking-async/runtime-api", default-features = false }
+pallet-staking-reward-curve = { path = "third_party/polkadot-sdk/substrate/frame/staking/reward-curve", default-features = false }
+pallet-staking-reward-fn = { path = "third_party/polkadot-sdk/substrate/frame/staking/reward-fn", default-features = false }
+pallet-staking-runtime-api = { path = "third_party/polkadot-sdk/substrate/frame/staking/runtime-api", default-features = false }
+pallet-state-trie-migration = { path = "third_party/polkadot-sdk/substrate/frame/state-trie-migration", default-features = false }
+pallet-statement = { default-features = false, path = "third_party/polkadot-sdk/substrate/frame/statement" }
+pallet-sudo = { path = "third_party/polkadot-sdk/substrate/frame/sudo", default-features = false }
+pallet-timestamp = { path = "third_party/polkadot-sdk/substrate/frame/timestamp", default-features = false }
+pallet-tips = { path = "third_party/polkadot-sdk/substrate/frame/tips", default-features = false }
+pallet-transaction-payment = { path = "third_party/polkadot-sdk/substrate/frame/transaction-payment", default-features = false }
+pallet-transaction-payment-rpc = { path = "third_party/polkadot-sdk/substrate/frame/transaction-payment/rpc", default-features = false }
+pallet-transaction-payment-rpc-runtime-api = { path = "third_party/polkadot-sdk/substrate/frame/transaction-payment/rpc/runtime-api", default-features = false }
+pallet-transaction-storage = { default-features = false, path = "third_party/polkadot-sdk/substrate/frame/transaction-storage" }
+pallet-treasury = { path = "third_party/polkadot-sdk/substrate/frame/treasury", default-features = false }
+pallet-tx-pause = { default-features = false, path = "third_party/polkadot-sdk/substrate/frame/tx-pause" }
+pallet-uniques = { path = "third_party/polkadot-sdk/substrate/frame/uniques", default-features = false }
+pallet-utility = { path = "third_party/polkadot-sdk/substrate/frame/utility", default-features = false }
+pallet-verify-signature = { path = "third_party/polkadot-sdk/substrate/frame/verify-signature", default-features = false }
+pallet-vesting = { path = "third_party/polkadot-sdk/substrate/frame/vesting", default-features = false }
+pallet-whitelist = { path = "third_party/polkadot-sdk/substrate/frame/whitelist", default-features = false }
+pallet-xcm = { path = "third_party/polkadot-sdk/polkadot/xcm/pallet-xcm", default-features = false }
+pallet-xcm-benchmarks = { path = "third_party/polkadot-sdk/polkadot/xcm/pallet-xcm-benchmarks", default-features = false }
+pallet-xcm-bridge-hub = { path = "third_party/polkadot-sdk/bridges/modules/xcm-bridge-hub", default-features = false }
+pallet-xcm-bridge-hub-router = { path = "third_party/polkadot-sdk/bridges/modules/xcm-bridge-hub-router", default-features = false }
+parachain-info = { path = "third_party/polkadot-sdk/cumulus/parachains/pallets/parachain-info", default-features = false, package = "staging-parachain-info" }
+parachain-template-runtime = { path = "third_party/polkadot-sdk/templates/parachain/runtime" }
+parachains-common = { path = "third_party/polkadot-sdk/cumulus/parachains/common", default-features = false }
+parachains-relay = { path = "third_party/polkadot-sdk/bridges/relays/parachains" }
+parachains-runtimes-test-utils = { path = "third_party/polkadot-sdk/cumulus/parachains/runtimes/test-utils", default-features = false }
+penpal-emulated-chain = { path = "third_party/polkadot-sdk/cumulus/parachains/integration-tests/emulated/chains/parachains/testing/penpal" }
+penpal-runtime = { path = "third_party/polkadot-sdk/cumulus/parachains/runtimes/testing/penpal" }
+people-rococo-emulated-chain = { path = "third_party/polkadot-sdk/cumulus/parachains/integration-tests/emulated/chains/parachains/people/people-rococo" }
+people-rococo-runtime = { path = "third_party/polkadot-sdk/cumulus/parachains/runtimes/people/people-rococo" }
+people-westend-emulated-chain = { path = "third_party/polkadot-sdk/cumulus/parachains/integration-tests/emulated/chains/parachains/people/people-westend" }
+people-westend-runtime = { path = "third_party/polkadot-sdk/cumulus/parachains/runtimes/people/people-westend" }
+polkadot-approval-distribution = { path = "third_party/polkadot-sdk/polkadot/node/network/approval-distribution", default-features = false }
+polkadot-availability-bitfield-distribution = { path = "third_party/polkadot-sdk/polkadot/node/network/bitfield-distribution", default-features = false }
+polkadot-availability-distribution = { path = "third_party/polkadot-sdk/polkadot/node/network/availability-distribution", default-features = false }
+polkadot-availability-recovery = { path = "third_party/polkadot-sdk/polkadot/node/network/availability-recovery", default-features = false }
+polkadot-cli = { path = "third_party/polkadot-sdk/polkadot/cli", default-features = false }
+polkadot-collator-protocol = { path = "third_party/polkadot-sdk/polkadot/node/network/collator-protocol", default-features = false }
+polkadot-core-primitives = { path = "third_party/polkadot-sdk/polkadot/core-primitives", default-features = false }
+polkadot-dispute-distribution = { path = "third_party/polkadot-sdk/polkadot/node/network/dispute-distribution", default-features = false }
+polkadot-erasure-coding = { path = "third_party/polkadot-sdk/polkadot/erasure-coding", default-features = false }
+polkadot-gossip-support = { path = "third_party/polkadot-sdk/polkadot/node/network/gossip-support", default-features = false }
+polkadot-network-bridge = { path = "third_party/polkadot-sdk/polkadot/node/network/bridge", default-features = false }
+polkadot-node-collation-generation = { path = "third_party/polkadot-sdk/polkadot/node/collation-generation", default-features = false }
+polkadot-node-core-approval-voting = { path = "third_party/polkadot-sdk/polkadot/node/core/approval-voting", default-features = false }
+polkadot-node-core-approval-voting-parallel = { path = "third_party/polkadot-sdk/polkadot/node/core/approval-voting-parallel", default-features = false }
+polkadot-node-core-av-store = { path = "third_party/polkadot-sdk/polkadot/node/core/av-store", default-features = false }
+polkadot-node-core-backing = { path = "third_party/polkadot-sdk/polkadot/node/core/backing", default-features = false }
+polkadot-node-core-bitfield-signing = { path = "third_party/polkadot-sdk/polkadot/node/core/bitfield-signing", default-features = false }
+polkadot-node-core-candidate-validation = { path = "third_party/polkadot-sdk/polkadot/node/core/candidate-validation", default-features = false }
+polkadot-node-core-chain-api = { path = "third_party/polkadot-sdk/polkadot/node/core/chain-api", default-features = false }
+polkadot-node-core-chain-selection = { path = "third_party/polkadot-sdk/polkadot/node/core/chain-selection", default-features = false }
+polkadot-node-core-dispute-coordinator = { path = "third_party/polkadot-sdk/polkadot/node/core/dispute-coordinator", default-features = false }
+polkadot-node-core-parachains-inherent = { path = "third_party/polkadot-sdk/polkadot/node/core/parachains-inherent", default-features = false }
+polkadot-node-core-prospective-parachains = { path = "third_party/polkadot-sdk/polkadot/node/core/prospective-parachains", default-features = false }
+polkadot-node-core-provisioner = { path = "third_party/polkadot-sdk/polkadot/node/core/provisioner", default-features = false }
+polkadot-node-core-pvf = { path = "third_party/polkadot-sdk/polkadot/node/core/pvf", default-features = false }
+polkadot-node-core-pvf-checker = { path = "third_party/polkadot-sdk/polkadot/node/core/pvf-checker", default-features = false }
+polkadot-node-core-pvf-common = { path = "third_party/polkadot-sdk/polkadot/node/core/pvf/common", default-features = false }
+polkadot-node-core-pvf-execute-worker = { path = "third_party/polkadot-sdk/polkadot/node/core/pvf/execute-worker", default-features = false }
+polkadot-node-core-pvf-prepare-worker = { path = "third_party/polkadot-sdk/polkadot/node/core/pvf/prepare-worker", default-features = false }
+polkadot-node-core-runtime-api = { path = "third_party/polkadot-sdk/polkadot/node/core/runtime-api", default-features = false }
+polkadot-node-metrics = { path = "third_party/polkadot-sdk/polkadot/node/metrics", default-features = false }
+polkadot-node-network-protocol = { path = "third_party/polkadot-sdk/polkadot/node/network/protocol", default-features = false }
+polkadot-node-primitives = { path = "third_party/polkadot-sdk/polkadot/node/primitives", default-features = false }
+polkadot-node-subsystem = { path = "third_party/polkadot-sdk/polkadot/node/subsystem", default-features = false }
+polkadot-node-subsystem-test-helpers = { path = "third_party/polkadot-sdk/polkadot/node/subsystem-test-helpers" }
+polkadot-node-subsystem-types = { path = "third_party/polkadot-sdk/polkadot/node/subsystem-types", default-features = false }
+polkadot-node-subsystem-util = { path = "third_party/polkadot-sdk/polkadot/node/subsystem-util", default-features = false }
+polkadot-omni-node = { path = "third_party/polkadot-sdk/cumulus/polkadot-omni-node", default-features = false }
+polkadot-omni-node-lib = { path = "third_party/polkadot-sdk/cumulus/polkadot-omni-node/lib", default-features = false }
+polkadot-overseer = { path = "third_party/polkadot-sdk/polkadot/node/overseer", default-features = false }
+polkadot-parachain-primitives = { path = "third_party/polkadot-sdk/polkadot/parachain", default-features = false }
+polkadot-primitives = { path = "third_party/polkadot-sdk/polkadot/primitives", default-features = false }
+polkadot-primitives-test-helpers = { path = "third_party/polkadot-sdk/polkadot/primitives/test-helpers" }
+polkadot-rpc = { path = "third_party/polkadot-sdk/polkadot/rpc", default-features = false }
+polkadot-runtime-common = { path = "third_party/polkadot-sdk/polkadot/runtime/common", default-features = false }
+polkadot-runtime-metrics = { path = "third_party/polkadot-sdk/polkadot/runtime/metrics", default-features = false }
+polkadot-runtime-parachains = { path = "third_party/polkadot-sdk/polkadot/runtime/parachains", default-features = false }
+polkadot-sdk = { path = "third_party/polkadot-sdk/umbrella", default-features = false }
+polkadot-sdk-docs = { path = "third_party/polkadot-sdk/docs/sdk" }
+polkadot-service = { path = "third_party/polkadot-sdk/polkadot/node/service", default-features = false }
+polkadot-statement-distribution = { path = "third_party/polkadot-sdk/polkadot/node/network/statement-distribution", default-features = false }
+polkadot-statement-table = { path = "third_party/polkadot-sdk/polkadot/statement-table", default-features = false }
+polkadot-subsystem-bench = { path = "third_party/polkadot-sdk/polkadot/node/subsystem-bench" }
+polkadot-test-client = { path = "third_party/polkadot-sdk/polkadot/node/test/client" }
+polkadot-test-runtime = { path = "third_party/polkadot-sdk/polkadot/runtime/test-runtime" }
+polkadot-test-service = { path = "third_party/polkadot-sdk/polkadot/node/test/service" }
+prometheus-endpoint = { package = "substrate-prometheus-endpoint", path = "third_party/polkadot-sdk/substrate/utils/prometheus", default-features = false }
+relay-substrate-client = { path = "third_party/polkadot-sdk/bridges/relays/client-substrate" }
+relay-utils = { path = "third_party/polkadot-sdk/bridges/relays/utils" }
+remote-externalities = { path = "third_party/polkadot-sdk/substrate/utils/frame/remote-externalities", default-features = false, package = "frame-remote-externalities" }
+rococo-emulated-chain = { path = "third_party/polkadot-sdk/cumulus/parachains/integration-tests/emulated/chains/relays/rococo" }
+rococo-parachain-runtime = { path = "third_party/polkadot-sdk/cumulus/parachains/runtimes/testing/rococo-parachain" }
+rococo-runtime = { path = "third_party/polkadot-sdk/polkadot/runtime/rococo" }
+rococo-runtime-constants = { path = "third_party/polkadot-sdk/polkadot/runtime/rococo/constants", default-features = false }
+rococo-system-emulated-network = { path = "third_party/polkadot-sdk/cumulus/parachains/integration-tests/emulated/networks/rococo-system" }
+rococo-westend-system-emulated-network = { path = "third_party/polkadot-sdk/cumulus/parachains/integration-tests/emulated/networks/rococo-westend-system" }
+sc-allocator = { path = "third_party/polkadot-sdk/substrate/client/allocator", default-features = false }
+sc-authority-discovery = { path = "third_party/polkadot-sdk/substrate/client/authority-discovery", default-features = false }
+sc-basic-authorship = { path = "third_party/polkadot-sdk/substrate/client/basic-authorship", default-features = false }
+sc-block-builder = { path = "third_party/polkadot-sdk/substrate/client/block-builder", default-features = false }
+sc-chain-spec = { path = "third_party/polkadot-sdk/substrate/client/chain-spec", default-features = false }
+sc-chain-spec-derive = { path = "third_party/polkadot-sdk/substrate/client/chain-spec/derive", default-features = false }
+sc-cli = { path = "third_party/polkadot-sdk/substrate/client/cli", default-features = false }
+sc-client-api = { path = "third_party/polkadot-sdk/substrate/client/api", default-features = false }
+sc-client-db = { path = "third_party/polkadot-sdk/substrate/client/db", default-features = false }
+sc-consensus = { path = "third_party/polkadot-sdk/substrate/client/consensus/common", default-features = false }
+sc-consensus-aura = { path = "third_party/polkadot-sdk/substrate/client/consensus/aura", default-features = false }
+sc-consensus-babe = { path = "third_party/polkadot-sdk/substrate/client/consensus/babe", default-features = false }
+sc-consensus-babe-rpc = { path = "third_party/polkadot-sdk/substrate/client/consensus/babe/rpc", default-features = false }
+sc-consensus-beefy = { path = "third_party/polkadot-sdk/substrate/client/consensus/beefy", default-features = false }
+sc-consensus-beefy-rpc = { path = "third_party/polkadot-sdk/substrate/client/consensus/beefy/rpc", default-features = false }
+sc-consensus-epochs = { path = "third_party/polkadot-sdk/substrate/client/consensus/epochs", default-features = false }
+sc-consensus-grandpa = { path = "third_party/polkadot-sdk/substrate/client/consensus/grandpa", default-features = false }
+sc-consensus-grandpa-rpc = { path = "third_party/polkadot-sdk/substrate/client/consensus/grandpa/rpc", default-features = false }
+sc-consensus-manual-seal = { path = "third_party/polkadot-sdk/substrate/client/consensus/manual-seal", default-features = false }
+sc-consensus-pow = { path = "third_party/polkadot-sdk/substrate/client/consensus/pow", default-features = false }
+sc-consensus-slots = { path = "third_party/polkadot-sdk/substrate/client/consensus/slots", default-features = false }
+sc-executor = { path = "third_party/polkadot-sdk/substrate/client/executor", default-features = false }
+sc-executor-common = { path = "third_party/polkadot-sdk/substrate/client/executor/common", default-features = false }
+sc-executor-polkavm = { path = "third_party/polkadot-sdk/substrate/client/executor/polkavm", default-features = false }
+sc-executor-wasmtime = { path = "third_party/polkadot-sdk/substrate/client/executor/wasmtime", default-features = false }
+sc-informant = { path = "third_party/polkadot-sdk/substrate/client/informant", default-features = false }
+sc-keystore = { path = "third_party/polkadot-sdk/substrate/client/keystore", default-features = false }
+sc-mixnet = { path = "third_party/polkadot-sdk/substrate/client/mixnet", default-features = false }
+sc-network = { path = "third_party/polkadot-sdk/substrate/client/network", default-features = false }
+sc-network-common = { path = "third_party/polkadot-sdk/substrate/client/network/common", default-features = false }
+sc-network-gossip = { path = "third_party/polkadot-sdk/substrate/client/network-gossip", default-features = false }
+sc-network-light = { path = "third_party/polkadot-sdk/substrate/client/network/light", default-features = false }
+sc-network-statement = { default-features = false, path = "third_party/polkadot-sdk/substrate/client/network/statement" }
+sc-network-sync = { path = "third_party/polkadot-sdk/substrate/client/network/sync", default-features = false }
+sc-network-test = { path = "third_party/polkadot-sdk/substrate/client/network/test" }
+sc-network-transactions = { path = "third_party/polkadot-sdk/substrate/client/network/transactions", default-features = false }
+sc-network-types = { path = "third_party/polkadot-sdk/substrate/client/network/types", default-features = false }
+sc-offchain = { path = "third_party/polkadot-sdk/substrate/client/offchain", default-features = false }
+sc-proposer-metrics = { path = "third_party/polkadot-sdk/substrate/client/proposer-metrics", default-features = false }
+sc-rpc = { path = "third_party/polkadot-sdk/substrate/client/rpc", default-features = false }
+sc-rpc-api = { path = "third_party/polkadot-sdk/substrate/client/rpc-api", default-features = false }
+sc-rpc-server = { path = "third_party/polkadot-sdk/substrate/client/rpc-servers", default-features = false }
+sc-rpc-spec-v2 = { path = "third_party/polkadot-sdk/substrate/client/rpc-spec-v2", default-features = false }
+sc-runtime-test = { path = "third_party/polkadot-sdk/substrate/client/executor/runtime-test" }
+sc-runtime-utilities = { path = "third_party/polkadot-sdk/substrate/client/runtime-utilities", default-features = true }
+sc-service = { path = "third_party/polkadot-sdk/substrate/client/service", default-features = false }
+sc-service-test = { path = "third_party/polkadot-sdk/substrate/client/service/test" }
+sc-state-db = { path = "third_party/polkadot-sdk/substrate/client/state-db", default-features = false }
+sc-statement-store = { default-features = false, path = "third_party/polkadot-sdk/substrate/client/statement-store" }
+sc-storage-monitor = { path = "third_party/polkadot-sdk/substrate/client/storage-monitor", default-features = false }
+sc-sync-state-rpc = { path = "third_party/polkadot-sdk/substrate/client/sync-state-rpc", default-features = false }
+sc-sysinfo = { path = "third_party/polkadot-sdk/substrate/client/sysinfo", default-features = false }
+sc-telemetry = { path = "third_party/polkadot-sdk/substrate/client/telemetry", default-features = false }
+sc-tracing = { path = "third_party/polkadot-sdk/substrate/client/tracing", default-features = false }
+sc-tracing-proc-macro = { path = "third_party/polkadot-sdk/substrate/client/tracing/proc-macro", default-features = false }
+sc-transaction-pool = { path = "third_party/polkadot-sdk/substrate/client/transaction-pool", default-features = false }
+sc-transaction-pool-api = { path = "third_party/polkadot-sdk/substrate/client/transaction-pool/api", default-features = false }
+sc-utils = { path = "third_party/polkadot-sdk/substrate/client/utils", default-features = false }
+slot-range-helper = { path = "third_party/polkadot-sdk/polkadot/runtime/common/slot_range_helper", default-features = false }
+snowbridge-beacon-primitives = { path = "third_party/polkadot-sdk/bridges/snowbridge/primitives/beacon", default-features = false }
+snowbridge-core = { path = "third_party/polkadot-sdk/bridges/snowbridge/primitives/core", default-features = false }
+snowbridge-ethereum = { path = "third_party/polkadot-sdk/bridges/snowbridge/primitives/ethereum", default-features = false }
+snowbridge-inbound-queue-primitives = { path = "third_party/polkadot-sdk/bridges/snowbridge/primitives/inbound-queue", default-features = false }
+snowbridge-merkle-tree = { path = "third_party/polkadot-sdk/bridges/snowbridge/primitives/merkle-tree", default-features = false }
+snowbridge-outbound-queue-primitives = { path = "third_party/polkadot-sdk/bridges/snowbridge/primitives/outbound-queue", default-features = false }
+snowbridge-outbound-queue-runtime-api = { path = "third_party/polkadot-sdk/bridges/snowbridge/pallets/outbound-queue/runtime-api", default-features = false }
+snowbridge-outbound-queue-v2-runtime-api = { path = "third_party/polkadot-sdk/bridges/snowbridge/pallets/outbound-queue-v2/runtime-api", default-features = false }
+snowbridge-pallet-ethereum-client = { path = "third_party/polkadot-sdk/bridges/snowbridge/pallets/ethereum-client", default-features = false }
+snowbridge-pallet-ethereum-client-fixtures = { path = "third_party/polkadot-sdk/bridges/snowbridge/pallets/ethereum-client/fixtures", default-features = false }
+snowbridge-pallet-inbound-queue = { path = "third_party/polkadot-sdk/bridges/snowbridge/pallets/inbound-queue", default-features = false }
+snowbridge-pallet-inbound-queue-fixtures = { path = "third_party/polkadot-sdk/bridges/snowbridge/pallets/inbound-queue/fixtures", default-features = false }
+snowbridge-pallet-inbound-queue-v2 = { path = "third_party/polkadot-sdk/bridges/snowbridge/pallets/inbound-queue-v2", default-features = false }
+snowbridge-pallet-inbound-queue-v2-fixtures = { path = "third_party/polkadot-sdk/bridges/snowbridge/pallets/inbound-queue-v2/fixtures", default-features = false }
+snowbridge-pallet-outbound-queue = { path = "third_party/polkadot-sdk/bridges/snowbridge/pallets/outbound-queue", default-features = false }
+snowbridge-pallet-outbound-queue-v2 = { path = "third_party/polkadot-sdk/bridges/snowbridge/pallets/outbound-queue-v2", default-features = false }
+snowbridge-pallet-system = { path = "third_party/polkadot-sdk/bridges/snowbridge/pallets/system", default-features = false }
+snowbridge-pallet-system-frontend = { path = "third_party/polkadot-sdk/bridges/snowbridge/pallets/system-frontend", default-features = false }
+snowbridge-pallet-system-v2 = { path = "third_party/polkadot-sdk/bridges/snowbridge/pallets/system-v2", default-features = false }
+snowbridge-runtime-common = { path = "third_party/polkadot-sdk/bridges/snowbridge/runtime/runtime-common", default-features = false }
+snowbridge-runtime-test-common = { path = "third_party/polkadot-sdk/bridges/snowbridge/runtime/test-common", default-features = false }
+snowbridge-system-runtime-api = { path = "third_party/polkadot-sdk/bridges/snowbridge/pallets/system/runtime-api", default-features = false }
+snowbridge-system-v2-runtime-api = { path = "third_party/polkadot-sdk/bridges/snowbridge/pallets/system-v2/runtime-api", default-features = false }
+snowbridge-test-utils = { path = "third_party/polkadot-sdk/bridges/snowbridge/test-utils" }
+snowbridge-verification-primitives = { path = "third_party/polkadot-sdk/bridges/snowbridge/primitives/verification", default-features = false }
+solochain-template-runtime = { path = "third_party/polkadot-sdk/templates/solochain/runtime" }
+sp-api = { path = "third_party/polkadot-sdk/substrate/primitives/api", default-features = false }
+sp-api-proc-macro = { path = "third_party/polkadot-sdk/substrate/primitives/api/proc-macro", default-features = false }
+sp-application-crypto = { path = "third_party/polkadot-sdk/substrate/primitives/application-crypto", default-features = false }
+sp-arithmetic = { path = "third_party/polkadot-sdk/substrate/primitives/arithmetic", default-features = false }
+sp-authority-discovery = { path = "third_party/polkadot-sdk/substrate/primitives/authority-discovery", default-features = false }
+sp-block-builder = { path = "third_party/polkadot-sdk/substrate/primitives/block-builder", default-features = false }
+sp-blockchain = { path = "third_party/polkadot-sdk/substrate/primitives/blockchain", default-features = false }
+sp-consensus = { path = "third_party/polkadot-sdk/substrate/primitives/consensus/common", default-features = false }
+sp-consensus-aura = { path = "third_party/polkadot-sdk/substrate/primitives/consensus/aura", default-features = false }
+sp-consensus-babe = { path = "third_party/polkadot-sdk/substrate/primitives/consensus/babe", default-features = false }
+sp-consensus-beefy = { path = "third_party/polkadot-sdk/substrate/primitives/consensus/beefy", default-features = false }
+sp-consensus-grandpa = { path = "third_party/polkadot-sdk/substrate/primitives/consensus/grandpa", default-features = false }
+sp-consensus-pow = { path = "third_party/polkadot-sdk/substrate/primitives/consensus/pow", default-features = false }
+sp-consensus-sassafras = { path = "third_party/polkadot-sdk/substrate/primitives/consensus/sassafras", default-features = false }
+sp-consensus-slots = { path = "third_party/polkadot-sdk/substrate/primitives/consensus/slots", default-features = false }
+sp-core = { path = "third_party/polkadot-sdk/substrate/primitives/core", default-features = false }
+sp-core-hashing = { default-features = false, path = "third_party/polkadot-sdk/substrate/deprecated/hashing" }
+sp-core-hashing-proc-macro = { default-features = false, path = "third_party/polkadot-sdk/substrate/deprecated/hashing/proc-macro" }
+sp-crypto-ec-utils = { default-features = false, path = "third_party/polkadot-sdk/substrate/primitives/crypto/ec-utils" }
+sp-crypto-hashing = { path = "third_party/polkadot-sdk/substrate/primitives/crypto/hashing", default-features = false }
+sp-crypto-hashing-proc-macro = { path = "third_party/polkadot-sdk/substrate/primitives/crypto/hashing/proc-macro", default-features = false }
+sp-database = { path = "third_party/polkadot-sdk/substrate/primitives/database", default-features = false }
+sp-debug-derive = { path = "third_party/polkadot-sdk/substrate/primitives/debug-derive", default-features = false }
+sp-externalities = { path = "third_party/polkadot-sdk/substrate/primitives/externalities", default-features = false }
+sp-genesis-builder = { path = "third_party/polkadot-sdk/substrate/primitives/genesis-builder", default-features = false }
+sp-inherents = { path = "third_party/polkadot-sdk/substrate/primitives/inherents", default-features = false }
+sp-io = { path = "third_party/polkadot-sdk/substrate/primitives/io", default-features = false }
+sp-keyring = { path = "third_party/polkadot-sdk/substrate/primitives/keyring", default-features = false }
+sp-keystore = { path = "third_party/polkadot-sdk/substrate/primitives/keystore", default-features = false }
+sp-maybe-compressed-blob = { path = "third_party/polkadot-sdk/substrate/primitives/maybe-compressed-blob", default-features = false }
+sp-metadata-ir = { path = "third_party/polkadot-sdk/substrate/primitives/metadata-ir", default-features = false }
+sp-mixnet = { path = "third_party/polkadot-sdk/substrate/primitives/mixnet", default-features = false }
+sp-mmr-primitives = { path = "third_party/polkadot-sdk/substrate/primitives/merkle-mountain-range", default-features = false }
+sp-npos-elections = { path = "third_party/polkadot-sdk/substrate/primitives/npos-elections", default-features = false }
+sp-offchain = { path = "third_party/polkadot-sdk/substrate/primitives/offchain", default-features = false }
+sp-panic-handler = { path = "third_party/polkadot-sdk/substrate/primitives/panic-handler", default-features = false }
+sp-rpc = { path = "third_party/polkadot-sdk/substrate/primitives/rpc", default-features = false }
+sp-runtime = { path = "third_party/polkadot-sdk/substrate/primitives/runtime", default-features = false }
+sp-runtime-interface = { path = "third_party/polkadot-sdk/substrate/primitives/runtime-interface", default-features = false }
+sp-runtime-interface-proc-macro = { path = "third_party/polkadot-sdk/substrate/primitives/runtime-interface/proc-macro", default-features = false }
+sp-runtime-interface-test-wasm = { path = "third_party/polkadot-sdk/substrate/primitives/runtime-interface/test-wasm" }
+sp-runtime-interface-test-wasm-deprecated = { path = "third_party/polkadot-sdk/substrate/primitives/runtime-interface/test-wasm-deprecated" }
+sp-session = { path = "third_party/polkadot-sdk/substrate/primitives/session", default-features = false }
+sp-staking = { path = "third_party/polkadot-sdk/substrate/primitives/staking", default-features = false }
+sp-state-machine = { path = "third_party/polkadot-sdk/substrate/primitives/state-machine", default-features = false }
+sp-statement-store = { path = "third_party/polkadot-sdk/substrate/primitives/statement-store", default-features = false }
+sp-std = { path = "third_party/polkadot-sdk/substrate/primitives/std", default-features = false }
+sp-storage = { path = "third_party/polkadot-sdk/substrate/primitives/storage", default-features = false }
+sp-test-primitives = { path = "third_party/polkadot-sdk/substrate/primitives/test-primitives" }
+sp-timestamp = { path = "third_party/polkadot-sdk/substrate/primitives/timestamp", default-features = false }
+sp-tracing = { path = "third_party/polkadot-sdk/substrate/primitives/tracing", default-features = false }
+sp-transaction-pool = { path = "third_party/polkadot-sdk/substrate/primitives/transaction-pool", default-features = false }
+sp-transaction-storage-proof = { path = "third_party/polkadot-sdk/substrate/primitives/transaction-storage-proof", default-features = false }
+sp-trie = { path = "third_party/polkadot-sdk/substrate/primitives/trie", default-features = false }
+sp-version = { path = "third_party/polkadot-sdk/substrate/primitives/version", default-features = false }
+sp-version-proc-macro = { path = "third_party/polkadot-sdk/substrate/primitives/version/proc-macro", default-features = false }
+sp-wasm-interface = { path = "third_party/polkadot-sdk/substrate/primitives/wasm-interface", default-features = false }
+sp-weights = { path = "third_party/polkadot-sdk/substrate/primitives/weights", default-features = false }
+subkey = { path = "third_party/polkadot-sdk/substrate/bin/utils/subkey", default-features = false }
+substrate-bip39 = { path = "third_party/polkadot-sdk/substrate/utils/substrate-bip39", default-features = false }
+substrate-build-script-utils = { path = "third_party/polkadot-sdk/substrate/utils/build-script-utils", default-features = false }
+substrate-cli-test-utils = { path = "third_party/polkadot-sdk/substrate/test-utils/cli" }
+substrate-frame-rpc-support = { default-features = false, path = "third_party/polkadot-sdk/substrate/utils/frame/rpc/support" }
+substrate-frame-rpc-system = { path = "third_party/polkadot-sdk/substrate/utils/frame/rpc/system", default-features = false }
+substrate-rpc-client = { path = "third_party/polkadot-sdk/substrate/utils/frame/rpc/client", default-features = false }
+substrate-state-trie-migration-rpc = { path = "third_party/polkadot-sdk/substrate/utils/frame/rpc/state-trie-migration-rpc", default-features = false }
+substrate-test-client = { path = "third_party/polkadot-sdk/substrate/test-utils/client" }
+substrate-test-runtime = { path = "third_party/polkadot-sdk/substrate/test-utils/runtime" }
+substrate-test-runtime-client = { path = "third_party/polkadot-sdk/substrate/test-utils/runtime/client", default-features = false }
+substrate-test-runtime-transaction-pool = { path = "third_party/polkadot-sdk/substrate/test-utils/runtime/transaction-pool" }
+substrate-test-utils = { path = "third_party/polkadot-sdk/substrate/test-utils", default-features = false }
+substrate-wasm-builder = { path = "third_party/polkadot-sdk/substrate/utils/wasm-builder", default-features = false }
+test-pallet = { path = "third_party/polkadot-sdk/substrate/frame/support/test/pallet", default-features = false, package = "frame-support-test-pallet" }
+test-parachain-adder = { path = "third_party/polkadot-sdk/polkadot/parachain/test-parachains/adder" }
+test-parachain-halt = { path = "third_party/polkadot-sdk/polkadot/parachain/test-parachains/halt" }
+test-parachain-undying = { path = "third_party/polkadot-sdk/polkadot/parachain/test-parachains/undying" }
+test-runtime-constants = { path = "third_party/polkadot-sdk/polkadot/runtime/test-runtime/constants", default-features = false }
+testnet-parachains-constants = { path = "third_party/polkadot-sdk/cumulus/parachains/runtimes/constants", default-features = false }
+tracking-allocator = { path = "third_party/polkadot-sdk/polkadot/node/tracking-allocator", default-features = false, package = "staging-tracking-allocator" }
+westend-emulated-chain = { path = "third_party/polkadot-sdk/cumulus/parachains/integration-tests/emulated/chains/relays/westend", default-features = false }
+westend-runtime = { path = "third_party/polkadot-sdk/polkadot/runtime/westend" }
+westend-runtime-constants = { path = "third_party/polkadot-sdk/polkadot/runtime/westend/constants", default-features = false }
+westend-system-emulated-network = { path = "third_party/polkadot-sdk/cumulus/parachains/integration-tests/emulated/networks/westend-system" }
+xcm = { package = "staging-xcm", path = "third_party/polkadot-sdk/polkadot/xcm", default-features = false }
+xcm-builder = { path = "third_party/polkadot-sdk/polkadot/xcm/xcm-builder", default-features = false, package = "staging-xcm-builder" }
+xcm-docs = { path = "third_party/polkadot-sdk/polkadot/xcm/docs" }
+xcm-emulator = { path = "third_party/polkadot-sdk/cumulus/xcm/xcm-emulator", default-features = false }
+xcm-executor = { path = "third_party/polkadot-sdk/polkadot/xcm/xcm-executor", default-features = false, package = "staging-xcm-executor" }
+xcm-procedural = { path = "third_party/polkadot-sdk/polkadot/xcm/procedural", default-features = false }
+xcm-runtime-apis = { path = "third_party/polkadot-sdk/polkadot/xcm/xcm-runtime-apis", default-features = false }
+xcm-simulator = { path = "third_party/polkadot-sdk/polkadot/xcm/xcm-simulator", default-features = false }
+yet-another-parachain-runtime = { path = "third_party/polkadot-sdk/cumulus/parachains/runtimes/testing/yet-another-parachain" }
+
+# path = "crate/frontier/..."
+fc-api = { path = "crate/frontier/client/api", default-features = false }
+fc-cli = { path = "crate/frontier/client/cli", default-features = false }
+fc-consensus = { path = "crate/frontier/client/consensus", default-features = false }
+fc-db = { path = "crate/frontier/client/db", default-features = false }
+fc-mapping-sync = { path = "crate/frontier/client/mapping-sync", default-features = false }
+fc-rpc = { path = "crate/frontier/client/rpc", default-features = false }
+fc-rpc-core = { path = "crate/frontier/client/rpc-core", default-features = false }
+fc-rpc-v2 = { path = "crate/frontier/client/rpc-v2", default-features = false }
+fc-rpc-v2-api = { path = "crate/frontier/client/rpc-v2/api", default-features = false }
+fc-rpc-v2-types = { path = "crate/frontier/client/rpc-v2/types", default-features = false }
+fc-storage = { path = "crate/frontier/client/storage", default-features = false }
+fp-account = { path = "crate/frontier/primitives/account", default-features = false }
+fp-consensus = { path = "crate/frontier/primitives/consensus", default-features = false }
+fp-dynamic-fee = { path = "crate/frontier/primitives/dynamic-fee", default-features = false }
+fp-ethereum = { path = "crate/frontier/primitives/ethereum", default-features = false }
+fp-evm = { path = "crate/frontier/primitives/evm", default-features = false }
+fp-rpc = { path = "crate/frontier/primitives/rpc", default-features = false }
+fp-self-contained = { path = "crate/frontier/primitives/self-contained", default-features = false }
+fp-storage = { path = "crate/frontier/primitives/storage", default-features = false }
+frontier-template-node = { path = "crate/frontier/template/node", default-features = false }
+frontier-template-runtime = { path = "crate/frontier/template/runtime", default-features = false }
+pallet-base-fee = { path = "crate/frontier/frame/base-fee", default-features = false }
+pallet-dynamic-fee = { path = "crate/frontier/frame/dynamic-fee", default-features = false }
+pallet-ethereum = { path = "crate/frontier/frame/ethereum", default-features = false }
+pallet-evm = { path = "crate/frontier/frame/evm", default-features = false }
+pallet-evm-chain-id = { path = "crate/frontier/frame/evm-chain-id", default-features = false }
+pallet-evm-polkavm = { path = "crate/frontier/frame/evm-polkavm", default-features = false }
+pallet-evm-polkavm-proc-macro = { path = "crate/frontier/frame/evm-polkavm/proc-macro", default-features = false }
+pallet-evm-polkavm-uapi = { path = "crate/frontier/frame/evm-polkavm/uapi", default-features = false }
+pallet-evm-precompile-blake2 = { path = "crate/frontier/frame/evm/precompile/blake2", default-features = false }
+pallet-evm-precompile-bls12377 = { path = "crate/frontier/frame/evm/precompile/bls12377", default-features = false }
+pallet-evm-precompile-bls12381 = { path = "crate/frontier/frame/evm/precompile/bls12381", default-features = false }
+pallet-evm-precompile-bn128 = { path = "crate/frontier/frame/evm/precompile/bn128", default-features = false }
+pallet-evm-precompile-bw6761 = { path = "crate/frontier/frame/evm/precompile/bw6761", default-features = false }
+pallet-evm-precompile-curve25519 = { path = "crate/frontier/frame/evm/precompile/curve25519", default-features = false }
+pallet-evm-precompile-dispatch = { path = "crate/frontier/frame/evm/precompile/dispatch", default-features = false }
+pallet-evm-precompile-ed25519 = { path = "crate/frontier/frame/evm/precompile/ed25519", default-features = false }
+pallet-evm-precompile-modexp = { path = "crate/frontier/frame/evm/precompile/modexp", default-features = false }
+pallet-evm-precompile-sha3fips = { path = "crate/frontier/frame/evm/precompile/sha3fips", default-features = false }
+pallet-evm-precompile-simple = { path = "crate/frontier/frame/evm/precompile/simple", default-features = false }
+pallet-evm-test-vector-support = { path = "crate/frontier/frame/evm/test-vector-support", default-features = false }
+pallet-hotfix-sufficients = { path = "crate/frontier/frame/hotfix-sufficients", default-features = false }
+precompile-utils = { path = "crate/frontier/precompiles", default-features = false }
+precompile-utils-macro = { path = "crate/frontier/precompiles/macro", default-features = false }
+precompile-utils-tests-external = { path = "crate/frontier/precompiles/tests-external", default-features = false }
+
+# crates.io / other dependencies
+aes-gcm = { version = "0.10" }
+ahash = { version = "0.8.2" }
+alloy-core = { version = "1.1.0", default-features = false }
+always-assert = { version = "0.1" }
+anyhow = { version = "1.0.81", default-features = false }
+approx = { version = "0.5.1" }
+aquamarine = { version = "0.5.0" }
+arbitrary = { version = "1.3.2" }
+ark-bls12-377 = { version = "0.4.0", default-features = false, features = ["curve"] }
+ark-bls12-377-ext = { version = "0.4.1", default-features = false }
+ark-bls12-381 = { version = "0.4.0", default-features = false, features = ["curve"] }
+ark-bls12-381-ext = { version = "0.4.1", default-features = false }
+ark-bw6-761 = { version = "0.4.0", default-features = false }
+ark-bw6-761-ext = { version = "0.4.1", default-features = false }
+ark-ec = { version = "0.4.0", default-features = false }
+ark-ed-on-bls12-377 = { version = "0.4.0", default-features = false }
+ark-ed-on-bls12-377-ext = { version = "0.4.1", default-features = false }
+ark-ed-on-bls12-381-bandersnatch = { version = "0.4.0", default-features = false }
+ark-ed-on-bls12-381-bandersnatch-ext = { version = "0.4.1", default-features = false }
+ark-ff = { version = "0.4.0", default-features = false }
+ark-scale = { version = "0.0.12", default-features = false }
+ark-std = { version = "0.4.0", default-features = false }
+ark-vrf = { version = "0.1.0", default-features = false }
+array-bytes = { version = "6.2.2", default-features = false }
+arrayvec = { version = "0.7.4" }
+assert_cmd = { version = "2.0.14" }
+assert_matches = { version = "1.5.0" }
+async-channel = { version = "1.8.0" }
+async-std = { version = "1.9.0" }
+async-trait = "0.1"
+asynchronous-codec = { version = "0.6" }
+backoff = { version = "0.4" }
+backtrace = { version = "0.3.71" }
+bincode = { version = "1.3.3" }
+bip39 = { package = "parity-bip39", version = "2.0.1", default-features = false }
+bitflags = "1.3.2"
+bitvec = { version = "1.0.1", default-features = false }
+blake2 = { version = "0.10.4", default-features = false }
+blake2b_simd = { version = "1.0.2", default-features = false }
+blake3 = { version = "1.5" }
+bn = { package = "substrate-bn", version = "0.6", default-features = false }
+bounded-collections = { version = "0.2.3", default-features = false }
+bounded-vec = { version = "0.7" }
+bs58 = { version = "0.5.1", default-features = false }
+build-helper = { version = "0.1.1" }
+byte-slice-cast = { version = "1.2.1", default-features = false }
+byteorder = { version = "1.3.2", default-features = false }
+bytes = { version = "1.4.0", default-features = false }
+cargo_metadata = { version = "0.15.4" }
+cfg-expr = { version = "0.15.5" }
+cfg-if = { version = "1.0" }
+chrono = { version = "0.4.31" }
+cid = { version = "0.9.0" }
+clap = { version = "4.5.13" }
+clap_complete = { version = "4.5.13" }
+cmd_lib = { version = "1.9.5" }
+coarsetime = { version = "0.1.22" }
+codec = { version = "3.7.5", default-features = false, package = "parity-scale-codec" }
+color-eyre = { version = "0.6.3", default-features = false }
+color-print = { version = "0.3.4" }
+colored = { version = "2.0.4" }
+comfy-table = { version = "7.1.4", default-features = false }
+console = { version = "0.15.8" }
+const-hex = { version = "1.14", default-features = false, features = ["alloc"] }
+cpu-time = { version = "1.0.0" }
+criterion = { version = "0.5.1", default-features = false }
+curve25519-dalek = { version = "4.1.3" }
+derive-syn-parse = { version = "0.2.0" }
+derive-where = { version = "1.2.7" }
+derive_more = { version = "0.99.17", default-features = false }
+digest = { version = "0.10.3", default-features = false }
+directories = { version = "5.0.1" }
+dlmalloc = { version = "0.2.4" }
+docify = { version = "0.2.9" }
+dyn-clonable = { version = "0.9.0" }
+dyn-clone = { version = "1.0.16" }
+ed25519-dalek = { version = "2.1", default-features = false }
+ed25519-zebra = { version = "4.0.3", default-features = false }
+either = { version = "1.8.1", default-features = false }
+enumflags2 = { version = "0.7.11" }
+enumn = { version = "0.1.13" }
+env_filter = { version = "0.1.3" }
+env_logger = { version = "0.11.2" }
+environmental = { version = "1.1.4", default-features = false }
+ethabi = { version = "2.0.0", default-features = false, package = "ethabi-decode" }
+ethbloom = { version = "0.14.1", default-features = false }
+ethereum = { version = "0.18.2", default-features = false }
+ethereum-types = { version = "0.15", default-features = false }
+evm = { version = "0.43.2", default-features = false }
+exit-future = { version = "0.2.0" }
+expander = { version = "2.0.0" }
+fatality = { version = "0.1.1" }
+fdlimit = { version = "0.3.0" }
+femme = { version = "2.2.1" }
+filetime = { version = "0.2.16" }
+finality-grandpa = { version = "0.16.3", default-features = false }
+flate2 = { version = "1.0" }
+fnv = { version = "1.0.6" }
+foldhash = { version = "0.1.5", default-features = false }
+forwarded-header-value = { version = "0.1.1" }
+fraction = { version = "0.13.1" }
+frame-metadata = { version = "23.0.0", default-features = false }
+fs4 = { version = "0.7.0" }
+fs_extra = { version = "1.3.0" }
+futures = { version = "0.3.31" }
+futures-timer = { version = "3.0.2" }
+futures-util = { version = "0.3.30", default-features = false }
+gethostname = { version = "0.2.3" }
+git2 = { version = "0.20.0", default-features = false }
+glob = { version = "0.3" }
+governor = { version = "0.6.0" }
+handlebars = { version = "5.1.0" }
+hash-db = { version = "0.16.0", default-features = false }
+hash256-std-hasher = { version = "0.15.2", default-features = false }
+hashbrown = "0.15.3"
+hex = { version = "0.4.3", default-features = false, features = ["alloc"] }
+hex-literal = { version = "0.4.1", default-features = false }
+hkdf = { version = "0.12.0" }
+hmac = { version = "0.12.1" }
+honggfuzz = { version = "0.5.55" }
+http = { version = "1.1" }
+http-body = { version = "1", default-features = false }
+http-body-util = { version = "0.1.2", default-features = false }
+humantime-serde = { version = "1.1" }
+hyper = { version = "1.3.1", default-features = false }
+hyper-rustls = { version = "0.27.3", default-features = false, features = ["http1", "http2", "logging", "ring", "rustls-native-certs", "tls12"] }
+hyper-util = { version = "0.1.5", default-features = false }
+impl-serde = { version = "0.5.0", default-features = false }
+impl-trait-for-tuples = "0.2.3"
+indexmap = { version = "2.7.1" }
+indicatif = { version = "0.17.7" }
+Inflector = { version = "0.11.4" }
+integer-sqrt = { version = "0.1.2" }
+ip_network = { version = "0.4.1" }
+is-terminal = { version = "0.4.9" }
+is_executable = { version = "1.0.1" }
+isahc = { version = "1.2" }
+itertools = { version = "0.11" }
+jobserver = { version = "0.1.26" }
+jsonpath_lib = { version = "0.3" }
+jsonrpsee = { version = "0.24.3" }
+jsonrpsee-core = { version = "0.24.9" }
+k256 = { version = "0.13.4", default-features = false }
+kvdb = { version = "0.13.0" }
+kvdb-memorydb = { version = "0.13.0" }
+kvdb-rocksdb = "0.19.0"
+kvdb-shared-tests = { version = "0.11.0" }
+landlock = { version = "0.3.0" }
+libc = { version = "0.2.155" }
+libfuzzer-sys = { version = "0.4" }
+libp2p = { version = "0.54.1" }
+libp2p-identity = { version = "0.2.9" }
+libp2p-kad = { version = "0.46.2", default-features = false }
+libsecp256k1 = { version = "0.7.2", default-features = false }
+linked-hash-map = { version = "0.5.4" }
+linked_hash_set = { version = "0.1.4" }
+linregress = { version = "0.5.1" }
+lite-json = { version = "0.2.0", default-features = false }
+litep2p = { version = "0.9.5", features = ["websocket"] }
+log = { version = "0.4.22", default-features = false }
+macro_magic = { version = "0.5.1" }
+maplit = { version = "1.0.2" }
+memmap2 = { version = "0.9.3" }
+memory-db = { version = "0.34.0", default-features = false }
+merkleized-metadata = { version = "0.5.0" }
+merlin = { version = "3.0", default-features = false }
+metered = { version = "0.6.1", default-features = false, package = "prioritized-metered-channel" }
+milagro-bls = { version = "1.5.4", default-features = false, package = "snowbridge-milagro-bls" }
+mixnet = { version = "0.7.0" }
+mmr-lib = { version = "0.8.1", package = "polkadot-ckb-merkle-mountain-range", default-features = false }
+mockall = { version = "0.13.1" }
+multiaddr = { version = "0.18.1" }
+multihash = { version = "0.19.1", default-features = false }
+multistream-select = { version = "0.13.0" }
+names = { version = "0.14.0", default-features = false }
+nix = { version = "0.29.0" }
+nohash-hasher = { version = "0.2.0" }
+novelpoly = { version = "2.0.0", package = "reed-solomon-novelpoly" }
+num-bigint = { version = "0.4.3", default-features = false }
+num-format = { version = "0.4.3" }
+num-integer = { version = "0.1.46", default-features = false }
+num-rational = { version = "0.4.1" }
+num-traits = { version = "0.2.17", default-features = false }
+num_cpus = { version = "1.13.1" }
+num_enum = { version = "0.7.3", default-features = false }
+once_cell = { version = "1.21.3" }
+orchestra = { version = "0.4.0", default-features = false }
+parity-bytes = { version = "0.1.2", default-features = false }
+parity-db = "0.4.13"
+parity-scale-codec = { version = "3.7.5", default-features = false }
+parity-wasm = { version = "0.45.0" }
+parking_lot = { version = "0.12.1", default-features = false }
+partial_sort = { version = "0.2.0" }
+paste = { version = "1.0.15", default-features = false }
+pbkdf2 = { version = "0.12.2", default-features = false }
+pin-project = { version = "1.1.3" }
+polkavm = { version = "0.24.0", default-features = false }
+polkavm-derive = "0.24.0"
+polkavm-linker = "0.24.0"
+portpicker = { version = "0.1.1" }
+pretty_assertions = { version = "1.3.0" }
+primitive-types = { version = "0.13.1", default-features = false, features = ["num-traits"] }
+proc-macro-crate = { version = "3.0.0" }
+proc-macro-warning = { version = "1.0.0", default-features = false }
+proc-macro2 = "1.0.86"
+procfs = { version = "0.16.0" }
+prometheus = { version = "0.13.0", default-features = false }
+prometheus-parse = { version = "0.2.2" }
+prost = { version = "0.12.4" }
+prost-build = { version = "0.13.2" }
+pyroscope = { version = "0.5.8" }
+pyroscope_pprofrs = { version = "0.2.8" }
+quick_cache = { version = "0.3" }
+quickcheck = { version = "1.0.3", default-features = false }
+quote = "1.0.38"
+rand = { version = "0.8.5", default-features = false }
+rand_chacha = { version = "0.3.1", default-features = false }
+rand_core = { version = "0.6.2" }
+rand_distr = { version = "0.4.3" }
+rand_pcg = { version = "0.3.1" }
+rbtag = { version = "0.3" }
+ref-cast = { version = "1.0.23" }
+regex = { version = "1.10.2" }
+reqwest = { version = "0.11", features = ["json"] }
+ripemd = { version = "0.1.3", default-features = false }
+rlp = { version = "0.6", default-features = false }
+rpassword = { version = "7.0.0" }
+rstest = { version = "0.18.2" }
+rustc-hash = { version = "1.1.0" }
+rustc-hex = { version = "2.1.0", default-features = false }
+rustix = { version = "0.36.7", default-features = false }
+rustls = { version = "0.23.18", default-features = false, features = ["logging", "ring", "std", "tls12"] }
+rustversion = { version = "1.0.17" }
+rusty-fork = { version = "0.3.0", default-features = false }
+safe-mix = { version = "1.0", default-features = false }
+safer-ffi = { version = "0.1.13", default-features = false }
+scale-codec = { package = "parity-scale-codec", version = "3.7.5", default-features = false, features = ["derive"] }
+scale-info = { version = "2.11.6", default-features = false }
+schemars = { version = "0.8.13", default-features = false }
+schnellru = { version = "0.2.3" }
+schnorrkel = { version = "0.11.4", default-features = false }
+seccompiler = { version = "0.4.0" }
+secp256k1 = { version = "0.28.0", default-features = false }
+secrecy = { version = "0.8.0", default-features = false }
+serde = { version = "1.0.214", default-features = false }
+serde-big-array = { version = "0.3.2" }
+serde_derive = { version = "1.0.117" }
+serde_json = { version = "1.0.132", default-features = false }
+serde_with = { version = "3.12.0", default-features = false, features = ["hex", "macros"] }
+serde_yaml = { version = "0.9" }
+sha1 = { version = "0.10.6" }
+sha2 = { version = "0.10.7", default-features = false }
+sha3 = { version = "0.10.0", default-features = false }
+shlex = { version = "1.3.0" }
+similar-asserts = "1.7.0"
+simple-mermaid = { version = "0.1.1" }
+slotmap = { version = "1.0" }
+smallvec = { version = "1.11.0", default-features = false }
+smoldot = { version = "0.11.0", default-features = false }
+smoldot-light = { version = "0.9.0", default-features = false }
+soketto = { version = "0.8.0" }
+spinners = { version = "4.1.1" }
+sqlx = { version = "0.8.2" }
+ss58-registry = { version = "1.34.0", default-features = false }
+ssz_rs = { version = "0.9.0", default-features = false }
+ssz_rs_derive = { version = "0.9.0", default-features = false }
+static_assertions = { version = "1.1.0", default-features = false }
+static_init = { version = "1.0.3" }
+strum = { version = "0.26.3", default-features = false }
+subxt = { version = "0.41", default-features = false }
+subxt-metadata = { version = "0.41", default-features = false }
+subxt-signer = { version = "0.41" }
+syn = "2.0.87"
+sysinfo = { version = "0.30" }
+tar = { version = "0.4" }
+tempfile = { version = "3.8.1" }
+test-log = { version = "0.2.14" }
+thiserror = { version = "1.0.64" }
+thousands = { version = "0.2.0" }
+threadpool = { version = "1.7" }
+tikv-jemalloc-ctl = { version = "0.5.0" }
+tikv-jemallocator = { version = "0.5.0" }
+time = { version = "0.3" }
+tiny-keccak = { version = "2.0.2" }
+tokio = { version = "1.44.2", features = ["full"] }
+tokio-retry = { version = "0.3.0" }
+tokio-stream = { version = "0.1.14" }
+tokio-test = { version = "0.4.4" }
+tokio-tungstenite = { version = "0.26.2" }
+tokio-util = { version = "0.7.8" }
+toml = { version = "0.8.12" }
+toml_edit = { version = "0.19" }
+tower = { version = "0.4.13" }
+tower-http = { version = "0.5.2" }
+tracing = { version = "0.1.37", default-features = false }
+tracing-core = { version = "0.1.32", default-features = false }
+tracing-futures = { version = "0.2.4" }
+tracing-log = { version = "0.2.0" }
+tracing-subscriber = { version = "0.3.18" }
+trie-bench = { version = "0.42.0" }
+trie-db = { version = "^0.30", default-features = false }
+trie-root = { version = "0.18.0", default-features = false }
+trie-standardmap = { version = "0.16.0" }
+trybuild = { version = "1.0.103" }
+tt-call = { version = "1.0.8" }
+tuplex = { version = "0.1", default-features = false }
+twox-hash = { version = "1.6.3", default-features = false }
+txtesttool = { version = "0.5.0", package = "substrate-txtesttool" }
+unsigned-varint = { version = "0.7.2" }
+url = "2.5.4"
+verifiable = { version = "0.1", default-features = false }
+void = { version = "1.0.2" }
+w3f-bls = { version = "0.1.9", default-features = false }
+wait-timeout = { version = "0.2" }
+walkdir = { version = "2.5.0" }
+wasm-instrument = { version = "0.4", default-features = false }
+wasm-opt = { version = "0.116" }
+wasm-timer = { version = "0.2.5" }
+wasmi = { version = "0.32.3", default-features = false }
+wasmtime = { version = "8.0.1", default-features = false }
+wat = { version = "1.0.0" }
+x25519-dalek = { version = "2.0" }
+zeroize = { version = "1.7.0", default-features = false }
+zombienet-orchestrator = { version = "0.3.0" }
+zombienet-sdk = { version = "0.3.0" }
+zstd = { version = "0.12.4", default-features = false }
+
+[workspace.lints]
+
+[profile.release]
+opt-level = 3
+panic = "unwind"
+
+[profile.production]
+codegen-units = 1
+inherits = "release"
+lto = true
+
+[profile.dev]
+debug = "line-tables-only"     # 想要最快就写 0；断点还能用行号
+
+
+# [patch.crates-io]
+# sc-network = { path = "./sc-network" }
+# sc-consensus-babe = { path = "./sc-consensus-babe" }
+
+[patch.crates-io]
+# sp-crypto-hashing = {git = "https://github.com/paritytech/polkadot-sdk", branch="stable2506"} 

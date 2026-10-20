@@ -1,0 +1,32 @@
+[package]
+name = "sun-admin"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+
+[[bin]]
+name = "sun-admin"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+sunchain-runtime = { workspace = true, features = ["std"] }
+clap = { features = ["derive", "env"], workspace = true }
+frame-metadata-hash-extension.workspace = true
+frame-system.workspace = true
+fp-account.workspace = true
+hex.workspace = true
+jsonrpsee = { workspace = true, features = ["ws-client"] }
+pallet-base-fee.workspace = true
+pallet-balances.workspace = true
+pallet-staking.workspace = true
+pallet-sudo.workspace = true
+pallet-transaction-payment.workspace = true
+scale-codec.workspace = true
+serde = { workspace = true, features = ["derive", "std"] }
+sp-core = { workspace = true, features = ["std"] }
+sp-crypto-hashing.workspace = true
+sp-io.workspace = true
+sp-staking.workspace = true
+sp-runtime = { workspace = true, features = ["std"] }
+tokio.workspace = true
