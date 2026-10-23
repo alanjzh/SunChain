@@ -8,8 +8,13 @@
 //! Only bookkeeping lives here — validation is injected by the caller — so the ordering
 //! rules can be tested without a client.
 
-use std::collections::BTreeMap;
+use std::{
+	collections::BTreeMap,
+	fs,
+	path::{Path, PathBuf},
+};
 
+use scale_codec::{Decode, Encode};
 use sunchain_runtime::apis::{ExchangeSignedAction, SortKey};
 
 /// Why the pool refused an action.
@@ -24,14 +29,69 @@ pub enum Reject {
 }
 
 /// Actions waiting to be bundled.
+///
+/// The queue is in memory, but if a persistence path is given it is reloaded on construction and
+/// rewritten whenever it changes (S2-6), so a node restart no longer discards actions that were
+/// queued but not yet included. A crash can still lose at most the actions submitted after the
+/// last write — the same bound a transaction pool has.
 pub struct ExchangePool {
 	queue: BTreeMap<(Vec<u8>, u32, u64), ExchangeSignedAction>,
 	limit: usize,
+	path: Option<PathBuf>,
 }
 
 impl ExchangePool {
-	pub fn new(limit: usize) -> Self {
-		Self { queue: BTreeMap::new(), limit }
+	pub fn new(limit: usize, path: Option<PathBuf>) -> Self {
+		let mut pool = Self { queue: BTreeMap::new(), limit, path };
+		if let Some(path) = pool.path.clone() {
+			if let Err(e) = pool.load(&path) {
+				log::warn!(target: "exchange", "could not load pool from {:?}: {e}", path);
+			}
+		}
+		pool
+	}
+
+	/// Reloads previously persisted actions (S2-6). Skips anything that no longer fits or is a
+	/// duplicate; the runtime re-validates anyway when the action is next proposed.
+	fn load(&mut self, path: &Path) -> std::io::Result<()> {
+		let bytes = fs::read(path)?;
+		if bytes.is_empty() {
+			return Ok(())
+		}
+		let actions: Vec<ExchangeSignedAction> = Decode::decode(&mut &bytes[..])
+			.map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+		let mut loaded = 0;
+		for action in actions {
+			if self.insert_raw(action) {
+				loaded += 1;
+			}
+		}
+		if loaded > 0 {
+			log::info!(target: "exchange", "restored {loaded} queued action(s) from {:?}", path);
+		}
+		Ok(())
+	}
+
+	/// Writes the current queue to disk (S2-6). A no-op when no path is configured.
+	pub fn save(&self) -> std::io::Result<()> {
+		let Some(path) = self.path.clone() else { return Ok(()) };
+		let actions: Vec<ExchangeSignedAction> = self.queue.values().cloned().collect();
+		let bytes = actions.encode();
+		fs::write(&path, bytes)
+	}
+
+	/// Inserts an action directly, bypassing the pool's submit-time checks (used on reload).
+	/// Returns false if it was a duplicate.
+	fn insert_raw(&mut self, action: ExchangeSignedAction) -> bool {
+		let key = (action.signer.0.to_vec(), action.subaccount, action.action_nonce);
+		if self.queue.contains_key(&key) {
+			return false
+		}
+		if self.queue.len() >= self.limit {
+			return false
+		}
+		self.queue.insert(key, action);
+		true
 	}
 
 	/// Queues an action, rejecting duplicates and refusing to grow without bound.
@@ -138,7 +198,7 @@ mod tests {
 	}
 
 	fn pool() -> ExchangePool {
-		ExchangePool::new(8)
+		ExchangePool::new(8, None)
 	}
 
 	#[test]
@@ -223,4 +283,43 @@ mod tests {
 		p.retain_valid(|a| a.signer.0[0] == 1);
 		assert_eq!(p.len(), 1, "only the executed action is dropped");
 	}
+
+	/// S2-6: a queued action survives a round-trip through the on-disk store.
+	#[test]
+	fn the_pool_persists_across_a_reload() {
+		let dir = tempdir();
+		let path = dir.join("exchange_pool.bin");
+
+		let submitted = {
+			let mut p = ExchangePool::new(8, Some(path.clone()));
+			p.submit(action(1, 1, place()), |_| true).unwrap();
+			p.submit(action(2, 5, ExchangeAction::Cancel(7)), |_| true).unwrap();
+			p.save().unwrap();
+			p.len()
+		};
+		assert_eq!(submitted, 2);
+
+		// A fresh pool pointed at the same file reloads both actions, in canonical order.
+		let reloaded = ExchangePool::new(8, Some(path));
+		assert_eq!(reloaded.len(), 2, "both actions are restored");
+		let nonces: Vec<u64> = reloaded.pending().into_iter().map(|(_, a)| a.action_nonce).collect();
+		assert_eq!(nonces, vec![5, 1], "cancels still sort ahead of places");
+	}
+
+	/// Loading a path that does not exist starts empty rather than failing.
+	#[test]
+	fn loading_a_missing_file_is_empty() {
+		let dir = tempdir();
+		let p = ExchangePool::new(8, Some(dir.join("nope.bin")));
+		assert!(p.is_empty());
+	}
+}
+
+/// A throwaway temp dir that is removed on drop.
+fn tempdir() -> std::path::PathBuf {
+	let base = std::env::temp_dir().join(format!("sunchain-pool-test-{}", std::process::id()));
+	std::fs::create_dir_all(&base).expect("temp dir is writable");
+	// Best-effort cleanup is fine; the OS temp dir recycles.
+	let _ = std::fs::remove_file(base.join("exchange_pool.bin"));
+	base
 }

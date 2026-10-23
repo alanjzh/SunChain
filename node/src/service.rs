@@ -366,8 +366,10 @@ pub async fn new_full_base<N: NetworkBackend<Block, <Block as sp_runtime::traits
         &sc_consensus_babe::BabeLink<Block>,
     ),
 ) -> Result<NewFullBase, ServiceError> {
+    let exchange_pool_path = config.base_path.path().join("exchange_pool.bin");
     let exchange_pool = Arc::new(std::sync::Mutex::new(crate::exchange_pool::ExchangePool::new(
         MAX_EXCHANGE_BATCH_ACTIONS,
+        Some(exchange_pool_path),
     )));
     let (exchange_outbound, exchange_inbound) = futures::channel::mpsc::unbounded();
     // The RPC closure below is `move`, so it needs its own handle to the same pool.
@@ -732,12 +734,16 @@ pub async fn new_full_base<N: NetworkBackend<Block, <Block as sp_runtime::traits
                 }
 
                 if let Ok(mut guard) = pool.lock() {
-                    let before = guard.len();
-                    guard.retain_valid(|a| still_valid.contains(&scale_codec::Encode::encode(a)));
-                    let dropped = before.saturating_sub(guard.len());
-                    if dropped > 0 {
-                        log::info!(target: "exchange", "dropped {dropped} executed action(s)");
-                    }
+                	let before = guard.len();
+                	guard.retain_valid(|a| still_valid.contains(&scale_codec::Encode::encode(a)));
+                	let dropped = before.saturating_sub(guard.len());
+                	if dropped > 0 {
+                		log::info!(target: "exchange", "dropped {dropped} executed action(s)");
+                	}
+                	// Persist after each prune so a restart reloads the surviving queue (S2-6).
+                	if let Err(e) = guard.save() {
+                		log::warn!(target: "exchange", "could not persist pool: {e}");
+                	}
                 }
             }
         });

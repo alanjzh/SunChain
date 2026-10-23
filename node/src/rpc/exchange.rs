@@ -143,6 +143,11 @@ where
 		let encoded = scale_codec::Encode::encode(&action);
 		pool.submit(action, |_| valid)
 			.map_err(|reject| rpc_error(format!("rejected by the pool: {reject:?}")))?;
+		// Persist the queue so a restart does not lose the action (S2-6). Failure here is not a
+		// submission failure.
+		if let Err(e) = pool.save() {
+			log::warn!(target: "exchange", "could not persist pool: {e}");
+		}
 
 		// Let the other nodes know. Failing to reach them is not a submission failure.
 		let _ = self.outbound.unbounded_send(encoded);
