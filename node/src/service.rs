@@ -767,31 +767,39 @@ pub async fn new_full_base<N: NetworkBackend<Block, <Block as sp_runtime::traits
         // market it is publishing for.
         //
         // Ids match the dev genesis: 0 BTC, 1 ETH, 2 SOL, 3 DOGE.
-        let oracle_markets: Vec<(u32, String, String, String)> = vec![
-            (0, "BTCUSDT".to_string(), "BTC-USDT".to_string(), "BTC-USD".to_string()),
-            (1, "ETHUSDT".to_string(), "ETH-USDT".to_string(), "ETH-USD".to_string()),
-            (2, "SOLUSDT".to_string(), "SOL-USDT".to_string(), "SOL-USD".to_string()),
-            (3, "DOGEUSDT".to_string(), "DOGE-USDT".to_string(), "DOGE-USD".to_string()),
+        // Binance and OKX quote USDT directly; Kraken's BTC pair is `XBTUSDT` and its DOGE
+        // pair is `XDGUSDT`; Bitfinex writes USDT pairs `tBTCUST` and `tDOGE:UST`. All four
+        // are USDT-quoted, so no venue needs converting.
+        let oracle_markets: Vec<(u32, String, String, String, String)> = vec![
+            (0, "BTCUSDT".to_string(), "BTC-USDT".to_string(), "XBTUSDT".to_string(), "tBTCUST".to_string()),
+            (1, "ETHUSDT".to_string(), "ETH-USDT".to_string(), "ETHUSDT".to_string(), "tETHUST".to_string()),
+            (2, "SOLUSDT".to_string(), "SOL-USDT".to_string(), "SOLUSDT".to_string(), "tSOLUST".to_string()),
+            (3, "DOGEUSDT".to_string(), "DOGE-USDT".to_string(), "XDGUSDT".to_string(), "tDOGE:UST".to_string()),
         ];
 
-        for (market_id, symbol_binance, symbol_okx, symbol_coinbase) in oracle_markets {
+        for (market_id, symbol_binance, symbol_okx, symbol_kraken, symbol_bitfinex) in oracle_markets {
             markets.push(FeedMarket {
                 market_id,
-                // USDT venues need no conversion; the USD venue is multiplied by how many
-                // USDT one dollar buys, which is the reciprocal of `USDT-USD`.
+                // Every venue here quotes USDT, so none of them needs converting. A USD
+                // venue would carry `ConversionDetails::adjust_by("USD-USDT", 1)`, which
+                // multiplies it by how many USDT one dollar buys.
+                //
+                // Coinbase is deliberately *not* a price source: it has no batch endpoint and
+                // answers one market per request, which measured ~2.7 s each behind a proxy —
+                // fine for the one peg rate, unusable for hundreds of markets.
                 sources: vec![
                     (Exchange::Binance, symbol_binance, ConversionDetails::NONE),
                     (Exchange::Okx, symbol_okx, ConversionDetails::NONE),
-                    (
-                        Exchange::CoinbasePro,
-                        symbol_coinbase,
-                        ConversionDetails::adjust_by("USD-USDT", 1),
-                    ),
+                    (Exchange::Kraken, symbol_kraken, ConversionDetails::NONE),
+                    (Exchange::Bitfinex, symbol_bitfinex, ConversionDetails::NONE),
                 ],
+                // The peg, asked for once a round however many markets configure it.
                 rate_sources: vec![
                     (Exchange::Okx, "USDT-USD".to_string()),
                     (Exchange::CoinbasePro, "USDT-USD".to_string()),
                 ],
+                // Four venues back the median; two are enough to publish, so one venue being
+                // down (or a market simply not listed on it) does not cost us the price.
                 min_exchanges: 2,
                 rate_min_exchanges: 1,
                 quote_decimals: 6,

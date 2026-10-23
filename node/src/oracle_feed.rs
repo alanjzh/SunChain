@@ -14,7 +14,8 @@
 //! Both already have their own unit-tested implementations (`pricefeed::convert`,
 //! `price_to_ticks`); this module is only the plumbing between them and the chain.
 
-use crate::pricefeed::{self, ConversionDetails, Exchange};
+use crate::pricefeed::{self, ConversionDetails, Exchange, Quote};
+use std::collections::{BTreeMap, HashMap};
 use sunchain_runtime::{Address, RuntimeCall, SignedPayload, TxExtension, UncheckedExtrinsic};
 use ecdsa_keyring::Keyring;
 use exchange_primitives::{price_to_ticks, MarketId, PriceTicks, FEED_SCALE};
@@ -56,13 +57,80 @@ pub struct FeedConfig {
 	pub signers: Vec<Keyring>,
 }
 
+/// Everything one round fetched, keyed by venue and that venue's spelling of the market.
+///
+/// A round is a handful of requests, not one per market: the venues are asked once (or in
+/// batches) and the markets are picked out of what came back. Collecting per market instead
+/// is what made four markets cost 10.6 MB every thirty seconds — the same venue's whole book,
+/// downloaded once per market.
+pub struct Round {
+	quotes: HashMap<(Exchange, String), Quote>,
+}
+
+impl Round {
+	pub fn get(&self, exchange: Exchange, symbol: &str) -> Option<Quote> {
+		self.quotes
+			.iter()
+			.find(|((venue, got), _)| *venue == exchange && pricefeed::symbol_matches(exchange, got, symbol))
+			.map(|(_, quote)| *quote)
+	}
+
+	pub fn len(&self) -> usize {
+		self.quotes.len()
+	}
+}
+
+/// Every `(venue, market)` a round has to ask for, deduplicated.
+///
+/// The peg is configured per market but is the same rate for all of them, so it appears here
+/// once however many markets ask for it.
+pub fn round_symbols(markets: &[FeedMarket]) -> BTreeMap<Exchange, Vec<String>> {
+	let mut wanted: BTreeMap<Exchange, Vec<String>> = BTreeMap::new();
+	for market in markets {
+		for (exchange, symbol, _) in &market.sources {
+			want(&mut wanted, *exchange, symbol)
+		}
+		for (exchange, symbol) in &market.rate_sources {
+			want(&mut wanted, *exchange, symbol)
+		}
+	}
+	wanted
+}
+
+fn want(wanted: &mut BTreeMap<Exchange, Vec<String>>, exchange: Exchange, symbol: &str) {
+	let list = wanted.entry(exchange).or_default();
+	if !list.iter().any(|s| s == symbol) {
+		list.push(symbol.to_string())
+	}
+}
+
+/// Asks each venue once per round for every market it is needed for.
+///
+/// A venue that cannot be reached contributes nothing, which is the per-venue failure the
+/// median already expects.
+pub async fn fetch_round(
+	client: &reqwest::Client,
+	wanted: &BTreeMap<Exchange, Vec<String>>,
+) -> Round {
+	let mut quotes = HashMap::new();
+	for (exchange, symbols) in wanted {
+		for (symbol, quote) in pricefeed::fetch_many(client, *exchange, symbols).await {
+			quotes.insert((*exchange, symbol), quote);
+		}
+	}
+	Round { quotes }
+}
+
 /// Collects the index price of one market, in the market's own quote currency, in ticks.
+///
+/// Takes the round's quotes rather than the network: the fetching already happened, once per
+/// venue, and a market is picked out of it here.
 ///
 /// Returns `None` when there is no trustworthy price — which is the intended outcome far more
 /// often than one might like: a venue being down, or the rate being unavailable, must produce
 /// *no* price rather than a wrong one.
-pub async fn collect(
-	client: &reqwest::Client,
+pub fn collect_from(
+	round: &Round,
 	market: &FeedMarket,
 	tick_size_quote: u128,
 	max_age: Duration,
@@ -73,7 +141,7 @@ pub async fn collect(
 	// The conversion rate first: without it, venues that need converting cannot be used.
 	let mut rate_quotes = Vec::new();
 	for (exchange, symbol) in &market.rate_sources {
-		if let Ok(quote) = pricefeed::fetch_quote(client, *exchange, symbol).await {
+		if let Some(quote) = round.get(*exchange, symbol) {
 			rate_quotes.push(quote);
 		}
 	}
@@ -84,9 +152,7 @@ pub async fn collect(
 
 	let mut converted = Vec::new();
 	for (exchange, symbol, details) in &market.sources {
-		let Ok(raw) = pricefeed::fetch_quote(client, *exchange, symbol).await else {
-			continue
-		};
+		let Some(raw) = round.get(*exchange, symbol) else { continue };
 		let Ok(price) = pricefeed::convert(
 			raw.price_millionths,
 			*details,
@@ -203,10 +269,13 @@ where
 		},
 	};
 
+	// Every market a round needs, per venue, asked for once — not once per market.
+	let wanted = round_symbols(&config.markets);
 	log::info!(
 		target: "oracle",
-		"feed started: {} market(s), every {:?}",
+		"feed started: {} market(s) over {} venue(s), every {:?}",
 		config.markets.len(),
+		wanted.len(),
 		config.interval
 	);
 
@@ -234,6 +303,10 @@ let mut notifications = client.import_notification_stream();
 		let at = client.info().best_hash;
 		let api = client.runtime_api();
 
+		// One pass over the venues, then the markets are picked out of what came back.
+		let quotes = fetch_round(&http, &wanted).await;
+		log::info!(target: "oracle", "round {round}: {} quote(s) fetched", quotes.len());
+
 		let mut prices = Vec::new();
 		for market in &config.markets {
 			// The tick size comes from the chain, not from config: a mismatch here would make
@@ -242,7 +315,7 @@ let mut notifications = client.import_notification_stream();
 				log::warn!(target: "oracle", "market {} has no tick size on chain", market.market_id);
 				continue
 			};
-			match collect(&http, market, tick_size, config.max_age).await {
+			match collect_from(&quotes, market, tick_size, config.max_age) {
 				Some(ticks) => prices.push((market.market_id, ticks)),
 				None =>
 					log::warn!(target: "oracle", "no price for market {}", market.market_id),

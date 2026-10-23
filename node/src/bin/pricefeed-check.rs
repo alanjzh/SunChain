@@ -147,6 +147,36 @@ async fn main() {
 		}
 	}
 
+	// What the daemon actually does: one request per venue for every market, rather than one
+	// request per market. This is the check that batch URLs, batch parsing and each venue's
+	// own spelling (Kraken's `XBTUSDT`/`XDGUSDT`, Bitfinex's `tDOGE:UST`) really work.
+	println!("\nround fetch (one request per venue, all markets at once)");
+	let wanted: Vec<(pricefeed::Exchange, Vec<String>)> = vec![
+		(
+			pricefeed::Exchange::Binance,
+			vec!["BTCUSDT".into(), "ETHUSDT".into(), "SOLUSDT".into(), "DOGEUSDT".into()],
+		),
+		(
+			pricefeed::Exchange::Okx,
+			vec!["BTC-USDT".into(), "ETH-USDT".into(), "SOL-USDT".into(), "DOGE-USDT".into()],
+		),
+		(
+			pricefeed::Exchange::Kraken,
+			vec!["XBTUSDT".into(), "ETHUSDT".into(), "SOLUSDT".into(), "XDGUSDT".into()],
+		),
+		(
+			pricefeed::Exchange::Bitfinex,
+			vec!["tBTCUST".into(), "tETHUST".into(), "tSOLUST".into(), "tDOGE:UST".into()],
+		),
+	];
+	for (venue, symbols) in &wanted {
+		let got = pricefeed::fetch_many(&client, *venue, symbols).await;
+		println!("  {:<14} {}/{} market(s)", venue, got.len(), symbols.len());
+		for (symbol, quote) in &got {
+			println!("      {:<12} {}", symbol, fmt(quote.price_millionths));
+		}
+	}
+
 	println!("\ntarget market (BTC), quote asset USDT");
 	println!("{:<16} {:<11} {:>15} {:>15}", "venue", "symbol", "raw", "in USDT");
 	for (exchange, symbol, _) in &target {

@@ -99,7 +99,9 @@ serde = { features = ["derive"], workspace = true, default-features = true }
 pallet-oracle.workspace = true
 exchange-primitives.workspace = true
 serde_json = { workspace = true, default-features = true }
-reqwest = { version = "0.11", default-features = false, features = ["rustls-tls", "json", "blocking"] }
+# `gzip`: the full-book endpoints answer ~1.9 MB uncompressed and ~284 kB gzipped, and
+# reqwest does not enable compression by default.
+reqwest = { version = "0.11", default-features = false, features = ["rustls-tls", "json", "blocking", "gzip"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 thiserror = "1.0"
 

@@ -20,7 +20,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 ///
 /// An explicit enum rather than a string, so a typo in config is a compile error and
 /// "which venues back our index price" is answerable by reading this file.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Exchange {
 	Binance,
 	Bitfinex,
@@ -34,6 +34,30 @@ pub enum Exchange {
 	KuCoin,
 	Mexc,
 	Okx,
+}
+
+/// How a venue can be asked for several markets at once.
+///
+/// This decides what a round costs. Getting it wrong is invisible locally and expensive
+/// remotely: a venue treated as [`FetchMode::Single`] costs one request *per market per
+/// round*, which is what turned a four-market feed into gigabytes a day. Measured 2026-10-23:
+///
+/// * Binance, one market: 559 B, weight 2. The whole book of 3 739 pairs: **1.9 MB**,
+///   weight 82 — and `?symbols=[…]` takes up to ~450 of them in one 233 kB request, after
+///   which the gateway answers **414**.
+/// * OKX has no batch endpoint at all (`instId=` is ignored, it still returns all 1 186
+///   instruments), so the only cheap move is one full request per round: 372 kB, 101 kB
+///   gzipped.
+/// * Kraken answers a comma-separated `pair=` list, but one unlisted pair fails the *whole*
+///   batch, so a batch that came back empty has to be retried market by market.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FetchMode {
+	/// One request returns every market; we pick ours out of it locally.
+	All,
+	/// One request can carry several symbols. `max` is what we dare put in one URL.
+	Batch { max: usize },
+	/// One market per request.
+	Single,
 }
 
 impl Exchange {
@@ -319,6 +343,74 @@ mod tests {
 		);
 	}
 
+	/// One response usually holds many markets; a round reads them all at once rather than
+	/// asking again per market.
+	#[test]
+	fn one_response_yields_every_market_in_it() {
+		let body = r#"[{"symbol":"ETHUSDT","bidPrice":"1","askPrice":"3","lastPrice":"2"},
+		               {"symbol":"BTCUSDT","bidPrice":"60000","askPrice":"60010","lastPrice":"60005"}]"#;
+		let all = Exchange::Binance.parse_tickers(body).unwrap();
+		assert_eq!(all.len(), 2);
+		assert_eq!(all[0].0, "ETHUSDT");
+		assert_eq!(all[1].1.price_millionths(), 60_005_000_000);
+	}
+
+	/// A market we did not ask for must not come back, and one malformed row must not cost
+	/// us the others.
+	#[test]
+	fn parse_tickers_skips_what_it_cannot_read() {
+		let body = r#"[{"symbol":"BTCUSDT","bidPrice":"60000","askPrice":"60010","lastPrice":"60005"},
+		               {"symbol":"BROKEN","bidPrice":"x","askPrice":"y","lastPrice":"z"}]"#;
+		let all = Exchange::Binance.parse_tickers(body).unwrap();
+		assert_eq!(all.len(), 1);
+		assert_eq!(all[0].0, "BTCUSDT");
+	}
+
+	/// The venues we actually poll must be able to answer several markets at once, or answer
+	/// everything in one go — otherwise a round costs one request per market.
+	#[test]
+	fn the_venues_we_poll_answer_more_than_one_market_at_a_time() {
+		for venue in [Exchange::Binance, Exchange::Okx, Exchange::Kraken, Exchange::Bitfinex] {
+			match venue.fetch_mode() {
+				FetchMode::All => {},
+				FetchMode::Batch { max } => assert!(max > 1, "{venue} batches nothing"),
+				FetchMode::Single => panic!("{venue} costs one request per market"),
+			}
+		}
+	}
+
+	#[test]
+	fn batch_urls_are_built_the_way_each_venue_expects() {
+		let symbols = ["BTCUSDT".to_string(), "ETHUSDT".to_string()];
+		assert_eq!(
+			Exchange::Binance.batch_ticker_url(&symbols).unwrap(),
+			"https://data-api.binance.vision/api/v3/ticker/24hr?symbols=\
+			 %5B%22BTCUSDT%22%2C%22ETHUSDT%22%5D"
+		);
+		assert_eq!(
+			Exchange::Kraken.batch_ticker_url(&symbols).unwrap(),
+			"https://api.kraken.com/0/public/Ticker?pair=BTCUSDT,ETHUSDT"
+		);
+		// Bitfinex's USDT pairs are written `tDOGE:UST`, so the colon has to be encoded.
+		assert_eq!(
+			Exchange::Bitfinex
+				.batch_ticker_url(&["tBTCUST".to_string(), "tDOGE:UST".to_string()])
+				.unwrap(),
+			"https://api-pub.bitfinex.com/v2/tickers?symbols=tBTCUST,tDOGE%3AUST"
+		);
+		// OKX has no batch endpoint; the caller has to take the whole list instead.
+		assert!(Exchange::Okx.batch_ticker_url(&symbols).is_none());
+	}
+
+	/// Kraken answers its older pairs under the canonical name: ask `XBTUSD`, get
+	/// `XXBTZUSD`. Missing that loses the venue with nothing to notice it by.
+	#[test]
+	fn kraken_answers_under_the_canonical_name() {
+		assert!(symbol_matches(Exchange::Kraken, "XXBTZUSD", "XBTUSD"));
+		assert!(symbol_matches(Exchange::Kraken, "XBTUSDT", "XBTUSDT"));
+		assert!(!symbol_matches(Exchange::Kraken, "XBTUSDT", "XBTUSD"));
+	}
+
 	/// The venue list is the reference for what backs our index price; guard its size so
 	/// adding a venue is a deliberate act.
 	#[test]
@@ -523,14 +615,42 @@ fn parse_multi_market(
 }
 
 impl Exchange {
-	/// REST endpoint for this venue's 24h ticker, or `None` for a venue we have not wired
-	/// yet (all twelve are wired now). Endpoints follow dYdX v4's
+	/// How this venue can be asked for several markets at once. See [`FetchMode`].
+	pub fn fetch_mode(self) -> FetchMode {
+		match self {
+			// `?symbols=["…","…"]`. The gateway answers 414 somewhere past 450 symbols
+			// (8.5 kB of query), so we keep well below that.
+			Exchange::Binance => FetchMode::Batch { max: 400 },
+			// `?symbols=tBTCUSD,tETHUSD`. Verified with 100 symbols.
+			Exchange::Bitfinex => FetchMode::Batch { max: 100 },
+			// `?pair=XBTUSDT,ETHUSDT`. Verified with 7; documented as "a few dozen", so we
+			// stay small — and a batch that fails is retried market by market anyway.
+			Exchange::Kraken => FetchMode::Batch { max: 20 },
+			// One market per request; no batch parameter exists.
+			Exchange::Mexc | Exchange::CoinbasePro | Exchange::Bitstamp => FetchMode::Single,
+			// The rest return every market in one response and have no filter that works.
+			Exchange::Okx
+			| Exchange::Bybit
+			| Exchange::CryptoCom
+			| Exchange::Gate
+			| Exchange::Huobi
+			| Exchange::KuCoin => FetchMode::All,
+		}
+	}
+
+	/// REST endpoint for this venue's 24h ticker for **one** market, or `None` for a venue
+	/// we have not wired yet (all twelve are wired now). Endpoints follow dYdX v4's
 	/// `exchange_query_details.go`.
+	///
+	/// Venues that can take several markets at once have [`Exchange::batch_ticker_url`];
+	/// this one is the fallback used when a batch has to be retried one market at a time.
 	pub fn ticker_url(self, symbol: &str) -> Option<String> {
 		Some(match self {
-			// dYdX: `/api/v3/ticker/24hr` on data-api.binance.vision.
+			// dYdX: `/api/v3/ticker/24hr` on data-api.binance.vision. Without `symbol` this
+			// returns all 3 739 pairs (~1.9 MB), which is exactly what we must not do per
+			// market; see `batch_ticker_url` for the multi-market form.
 			Exchange::Binance =>
-				"https://data-api.binance.vision/api/v3/ticker/24hr".to_string(),
+				format!("https://data-api.binance.vision/api/v3/ticker/24hr?symbol={}", pct(symbol)),
 			// dYdX: `/api/v5/market/tickers?instType=SPOT`.
 			Exchange::Okx => "https://www.okx.com/api/v5/market/tickers?instType=SPOT".to_string(),
 			// dYdX hits one product at a time (`/products/$/ticker`), and we deviate here.
@@ -540,29 +660,67 @@ impl Exchange {
 			// schema (`ask`, `bid`, `price`), so only the hostname changes.
 			Exchange::CoinbasePro =>
 				format!("https://api.exchange.coinbase.com/products/{symbol}/ticker"),
-			Exchange::Bitstamp => format!("https://www.bitstamp.net/api/v2/ticker/{symbol}"),
-			Exchange::Bitfinex => "https://api-pub.bitfinex.com/v2/tickers?symbols=ALL".to_string(),
+			Exchange::Bitstamp => format!("https://www.bitstamp.net/api/v2/ticker/{}", pct(symbol)),
+			// dYdX asks for `symbols=ALL` and filters locally. We ask for ours by name:
+			// one market is ~120 B against ~1 MB for the whole list.
+			Exchange::Bitfinex =>
+				format!("https://api-pub.bitfinex.com/v2/tickers?symbols={}", pct(symbol)),
 			Exchange::Bybit => "https://api.bybit.com/v5/market/tickers?category=spot".to_string(),
 			Exchange::CryptoCom => "https://api.crypto.com/v2/public/get-ticker".to_string(),
 			Exchange::Gate => "https://api.gateio.ws/api/v4/spot/tickers".to_string(),
 			Exchange::Huobi => "https://api.huobi.pro/market/tickers".to_string(),
-			Exchange::Kraken => "https://api.kraken.com/0/public/Ticker".to_string(),
+			// Without `pair` this returns every market; one pair is ~300 B.
+			Exchange::Kraken => format!("https://api.kraken.com/0/public/Ticker?pair={}", pct(symbol)),
 			Exchange::KuCoin => "https://api.kucoin.com/api/v1/market/allTickers".to_string(),
 			// v4 still points at MEXC's retired v2 endpoint, which now answers 404. v3 works and
 			// uses the same field names as Binance.
-			Exchange::Mexc => format!("https://api.mexc.com/api/v3/ticker/24hr?symbol={symbol}"),
-		})
-	}
+			Exchange::Mexc =>
+				format!("https://api.mexc.com/api/v3/ticker/24hr?symbol={}", pct(symbol)),
+			})
+			}
+
+			/// REST endpoint for **several** markets at once, or `None` for a venue that cannot do
+			/// that. This is what keeps a round at a handful of requests instead of one per market.
+			pub fn batch_ticker_url(self, symbols: &[String]) -> Option<String> {
+			if symbols.is_empty() {
+				return None
+			}
+			Some(match self {
+				// `?symbols=["BTCUSDT","ETHUSDT"]`, percent-encoded.
+				Exchange::Binance => {
+					let list: Vec<String> = symbols.iter().map(|s| format!("\"{s}\"")).collect();
+					format!(
+						"https://data-api.binance.vision/api/v3/ticker/24hr?symbols={}",
+						pct(&format!("[{}]", list.join(",")))
+					)
+				},
+				Exchange::Bitfinex => format!(
+					"https://api-pub.bitfinex.com/v2/tickers?symbols={}",
+					join_pct(symbols, ",")
+				),
+				Exchange::Kraken => format!(
+					"https://api.kraken.com/0/public/Ticker?pair={}",
+					join_pct(symbols, ",")
+				),
+				// No batch parameter exists: the caller falls back to one request per market.
+				_ => return None,
+			})
+			}
+
 
 	/// Turns a venue's response body into a [`Ticker`], read on that venue's own terms.
 	///
 	/// Every venue sends a different envelope — some a bare array, some `{"data": …}`, and two
 	/// (Bitfinex and Kraken) not objects at all. Pretending they share a shape is how parsers
 	/// quietly return nothing, so each is handled separately.
-	pub fn parse_ticker(self, symbol: &str, body: &str) -> Result<Ticker, PriceFeedError> {
+	/// One request usually carries many markets — a round is a handful of requests, not one
+	/// per market — so this returns every ticker the body holds, keyed by the venue's own
+	/// spelling. An entry that cannot be read is skipped rather than fatal: Kraken answers a
+	/// batch with the pairs it recognised, and one malformed row must not cost us the rest.
+	pub fn parse_tickers(self, body: &str) -> Result<Vec<(String, Ticker)>, PriceFeedError> {
 		let bad = |reason: String| PriceFeedError::Unavailable {
 			exchange: self,
-			symbol: symbol.to_string(),
+			symbol: String::new(),
 			reason,
 		};
 		let value: serde_json::Value =
@@ -571,45 +729,58 @@ impl Exchange {
 		// Bitfinex answers with an array of arrays: [SYMBOL, BID, BID_SIZE, ASK, ASK_SIZE,
 		// CHANGE, CHANGE_RELATIVE, LAST_PRICE, VOLUME, HIGH, LOW].
 		if self == Exchange::Bitfinex {
-			let row = value
-				.as_array()
-				.and_then(|rows| {
-					rows.iter()
-						.find(|row| row.get(0).and_then(|s| s.as_str()) == Some(symbol))
-				})
-				.ok_or_else(|| bad(format!("no listing for {symbol}")))?;
-			// Bitfinex sends JSON numbers, not decimal strings.
-			let at = |i: usize| -> Result<u64, PriceFeedError> {
-				let raw = match row.get(i).ok_or_else(|| bad("short row".into()))? {
-					serde_json::Value::String(v) => v.clone(),
-					serde_json::Value::Number(n) => format!("{:.8}", n.as_f64().unwrap_or(0.0)),
-					_ => return Err(bad("not a price".into())),
+			let rows =
+				value.as_array().ok_or_else(|| bad("response is not a list of tickers".into()))?;
+			let mut out = Vec::new();
+			for row in rows {
+				let Some(symbol) = row.get(0).and_then(|s| s.as_str()) else { continue };
+				// Bitfinex sends JSON numbers, not decimal strings.
+				let at = |i: usize| -> Option<u64> {
+					let raw = match row.get(i)? {
+						serde_json::Value::String(v) => v.clone(),
+						serde_json::Value::Number(n) => format!("{:.8}", n.as_f64()?),
+						_ => return None,
+					};
+					parse_price_millionths(&raw).ok()
 				};
-				parse_price_millionths(&raw).map_err(|_| bad("bad price".into()))
-			};
-			return Ok(Ticker {
-				bid_millionths: at(1)?,
-				ask_millionths: at(3)?,
-				last_millionths: at(7)?,
-			});
+				if let (Some(bid), Some(ask), Some(last)) = (at(1), at(3), at(7)) {
+					out.push((
+						symbol.to_string(),
+						Ticker {
+							bid_millionths: bid,
+							ask_millionths: ask,
+							last_millionths: last,
+						},
+					));
+				}
+			}
+			return Ok(out)
 		}
 
 		// Kraken answers with `{"result": {"<pair>": {"a": [...], "b": [...], "c": [...]}}}`,
 		// where each of `a`/`b`/`c` is [price, …] and `c` is the last trade.
 		if self == Exchange::Kraken {
-			let ticker = value["result"].get(symbol).ok_or_else(|| bad(format!("no listing for {symbol}")))?;
-			let first = |key: &str| -> Result<u64, PriceFeedError> {
-				let raw = ticker[key]
-					.get(0)
-					.and_then(|v| v.as_str())
-					.ok_or_else(|| bad(format!("missing {key}")))?;
-				parse_price_millionths(raw).map_err(|_| bad(format!("bad {key}")))
-			};
-			return Ok(Ticker {
-				bid_millionths: first("b")?,
-				ask_millionths: first("a")?,
-				last_millionths: first("c")?,
-			});
+			let result = value["result"]
+				.as_object()
+				.ok_or_else(|| bad("response has no `result`".into()))?;
+			let mut out = Vec::new();
+			for (symbol, ticker) in result {
+				let first = |key: &str| -> Option<u64> {
+					let raw = ticker.get(key)?.get(0)?.as_str()?;
+					parse_price_millionths(raw).ok()
+				};
+				if let (Some(bid), Some(ask), Some(last)) = (first("b"), first("a"), first("c")) {
+					out.push((
+						symbol.clone(),
+						Ticker {
+							bid_millionths: bid,
+							ask_millionths: ask,
+							last_millionths: last,
+						},
+					));
+				}
+			}
+			return Ok(out)
 		}
 
 		let entries: Vec<serde_json::Value> = match self {
@@ -652,30 +823,61 @@ impl Exchange {
 			Exchange::Bitfinex | Exchange::Kraken => unreachable!("handled above"),
 		};
 
+		let mut out = Vec::new();
 		for entry in &entries {
-			if pair_key.is_empty() {
-				// fetched per market: nothing to match on
-			} else if entry[pair_key].as_str() != Some(symbol) {
-				continue
-			}
-
-			// Huobi sends numbers; everyone else sends decimal strings.
-			let read = |key: &str| -> Result<u64, PriceFeedError> {
-				let raw = match &entry[key] {
-					serde_json::Value::String(s) => s.clone(),
-					serde_json::Value::Number(n) => format!("{:.8}", n.as_f64().unwrap_or(0.0)),
-					_ => return Err(bad(format!("missing field {key}"))),
-				};
-				parse_price_millionths(&raw).map_err(|_| bad(format!("bad field {key}")))
+			let symbol = if pair_key.is_empty() {
+				// fetched per market, so the body carries no symbol of its own
+				String::new()
+			} else {
+				match entry[pair_key].as_str() {
+					Some(s) => s.to_string(),
+					None => continue,
+				}
 			};
 
-			return Ok(Ticker {
-				bid_millionths: read(bid_key)?,
-				ask_millionths: read(ask_key)?,
-				last_millionths: read(last_key)?,
-			});
+			// Huobi sends numbers; everyone else sends decimal strings.
+			let read = |key: &str| -> Option<u64> {
+				let raw = match entry.get(key)? {
+					serde_json::Value::String(s) => s.clone(),
+					serde_json::Value::Number(n) => format!("{:.8}", n.as_f64()?),
+					_ => return None,
+				};
+				parse_price_millionths(&raw).ok()
+			};
+
+			if let (Some(bid), Some(ask), Some(last)) =
+				(read(bid_key), read(ask_key), read(last_key))
+			{
+				out.push((
+					symbol,
+					Ticker {
+						bid_millionths: bid,
+						ask_millionths: ask,
+						last_millionths: last,
+					},
+				));
+			}
 		}
-		Err(bad(format!("no listing for {symbol}")))
+		Ok(out)
+	}
+
+	/// The [`Ticker`] for one market out of a venue's response. See
+	/// [`Exchange::parse_tickers`], which is what a round actually uses.
+	pub fn parse_ticker(self, symbol: &str, body: &str) -> Result<Ticker, PriceFeedError> {
+		let all = self.parse_tickers(body)?;
+		if let Some((_, ticker)) = all.iter().find(|(s, _)| symbol_matches(self, s, symbol)) {
+			return Ok(*ticker)
+		}
+		// Fetched per market (Coinbase, Bitstamp): the body *is* the ticker and carries no
+		// symbol to match on, so there is exactly one entry and it has no name.
+		if let Some((_, ticker)) = all.iter().find(|(s, _)| s.is_empty()) {
+			return Ok(*ticker)
+		}
+		Err(PriceFeedError::Unavailable {
+			exchange: self,
+			symbol: symbol.to_string(),
+			reason: format!("no listing for {symbol}"),
+		})
 	}
 }
 
@@ -704,6 +906,138 @@ pub async fn fetch_quote(
 		.map_err(|e| PriceFeedError::Request { exchange, reason: e.to_string() })?;
 	let ticker = exchange.parse_ticker(symbol, &body)?;
 	Ok(Quote { exchange, price_millionths: ticker.price_millionths(), at_ms: now_ms() })
+}
+
+/// Percent-encodes just what a query cannot carry literally.
+///
+/// Symbols are alphanumeric apart from Bitfinex's `tDOGE:UST`; Binance's batch form also
+/// needs `[`, `]`, `"` and `,` encoded. Anything else would already be a broken symbol.
+fn pct(symbol: &str) -> String {
+	symbol
+		.replace('%', "%25")
+		.replace('[', "%5B")
+		.replace(']', "%5D")
+		.replace('"', "%22")
+		.replace(',', "%2C")
+		.replace(':', "%3A")
+}
+
+/// Several symbols joined by a separator that must survive encoding (`,` for Bitfinex and
+/// Kraken), so only the symbols themselves are encoded.
+fn join_pct(symbols: &[String], separator: &str) -> String {
+	symbols.iter().map(|s| pct(s)).collect::<Vec<_>>().join(separator)
+}
+
+/// Whether a symbol a venue answered with is the one we asked for.
+///
+/// Kraken answers its older pairs under their canonical name: ask for `XBTUSD` and the
+/// result is keyed `XXBTZUSD`. Its USDT pairs come back as asked, but the alias has to be
+/// understood either way, and the consequence of missing it is a silently absent venue.
+pub fn symbol_matches(exchange: Exchange, got: &str, want: &str) -> bool {
+	if got == want {
+		return true
+	}
+	exchange == Exchange::Kraken && kraken_alias(got) == kraken_alias(want)
+}
+
+/// `XXBTZUSD` and `XBTUSD` are the same pair; `XBTUSDT` is already canonical.
+fn kraken_alias(symbol: &str) -> String {
+	let without_prefix = symbol.strip_prefix('X').unwrap_or(symbol).to_string();
+	let without_quote_prefix = without_prefix
+		.replace("ZUSD", "USD")
+		.replace("ZUSDT", "USDT")
+		.replace("ZEUR", "EUR");
+	without_quote_prefix.strip_prefix('X').unwrap_or(&without_quote_prefix).to_string()
+}
+
+async fn get_body(client: &reqwest::Client, url: &str) -> Result<String, String> {
+	client
+		.get(url)
+		.send()
+		.await
+		.map_err(|e| e.to_string())?
+		.error_for_status()
+		.map_err(|e| e.to_string())?
+		.text()
+		.await
+		.map_err(|e| e.to_string())
+}
+
+/// Fetches every asked-for market from one venue, in as few requests as the venue allows.
+///
+/// This is the difference between a feed that costs a handful of requests a round and one
+/// that costs one request *per market per round* — which, with a venue that answers with
+/// its whole book, is how four markets turned into 10.6 MB every thirty seconds.
+///
+/// Returns only the markets that were asked for, each under the venue's own spelling; a
+/// venue that could not be reached simply contributes nothing, which is the same per-venue
+/// failure the median already expects.
+pub async fn fetch_many(
+	client: &reqwest::Client,
+	exchange: Exchange,
+	symbols: &[String],
+) -> Vec<(String, Quote)> {
+	let mut out: Vec<(String, Quote)> = Vec::new();
+	if symbols.is_empty() {
+		return out
+	}
+
+	let take = |out: &mut Vec<(String, Quote)>, all: &[(String, Ticker)], asked: &[String]| {
+		let at_ms = now_ms();
+		for (symbol, ticker) in all {
+			if asked.iter().any(|s| symbol_matches(exchange, symbol, s)) {
+				out.push((
+					symbol.clone(),
+					Quote {
+						exchange,
+						price_millionths: ticker.price_millionths(),
+						at_ms,
+					},
+				));
+			}
+		}
+	};
+
+	match exchange.fetch_mode() {
+		// No batch endpoint: one request returns every market and we pick ours out of it.
+		FetchMode::All => {
+			let Some(url) = exchange.ticker_url("") else { return out };
+			let Ok(body) = get_body(client, &url).await else { return out };
+			if let Ok(all) = exchange.parse_tickers(&body) {
+				take(&mut out, &all, symbols);
+			}
+		},
+		FetchMode::Batch { max } =>
+			for chunk in symbols.chunks(max) {
+				let mut answered = false;
+				if let Some(url) = exchange.batch_ticker_url(chunk) {
+					if let Ok(body) = get_body(client, &url).await {
+						if let Ok(all) = exchange.parse_tickers(&body) {
+							answered = !all.is_empty();
+							take(&mut out, &all, chunk);
+						}
+					}
+				}
+				// Kraken answers a batch containing one unknown pair with an empty result
+				// rather than the pairs it did recognise, so a batch that came back empty is
+				// retried market by market: one bad symbol then costs one market, not the lot.
+				if !answered {
+					for symbol in chunk {
+						if let Ok(quote) = fetch_quote(client, exchange, symbol).await {
+							out.push((symbol.clone(), quote));
+						}
+					}
+				}
+			},
+		FetchMode::Single =>
+			for symbol in symbols {
+				if let Ok(quote) = fetch_quote(client, exchange, symbol).await {
+					out.push((symbol.clone(), quote));
+				}
+			},
+	}
+
+	out
 }
 
 // --------------------------------------------------------------------------------------
