@@ -64,6 +64,7 @@ pub mod pallet {
     use frame_support::{
         dispatch::PostDispatchInfo,
         pallet_prelude::*,
+        storage::TransactionOutcome,
         traits::{
             tokens::{
                 fungibles::{Inspect, Mutate},
@@ -1094,6 +1095,11 @@ pub mod pallet {
                 );
                 let payload = Self::signed_action_payload(signed);
 
+                // Everything up to and including the nonce is *validation*: it writes nothing
+                // but the nonce, and a failure there leaves the account untouched. The
+                // business part below is transactional, because `do_place_order` writes as it
+                // goes — the maker's account and position first, the taker's and the market's
+                // last — and a failure in between used to leave half an order on the book.
                 let outcome = (|| -> DispatchResult {
                     // Sub-accounts are keyed into the nonce but not into the trading state
                     // machine, so a non-zero value would authorise one key and apply
@@ -1110,29 +1116,57 @@ pub mod pallet {
                     Self::ensure_action_fresh(signed.expires_at)?;
                     let last = ActionNonce::<T>::get(&who, signed.subaccount);
                     ensure!(signed.action_nonce > last, Error::<T>::InvalidActionNonce);
+                    // The nonce is consumed whether the business part succeeds or not (S1-2).
+                    // A signature that failed must not be replayable — retrying it would
+                    // otherwise be indistinguishable from a new one — and the receipt reports
+                    // `nonce_consumed` separately from the outcome, so the account can see
+                    // which of the two happened.
                     ActionNonce::<T>::insert(&who, signed.subaccount, signed.action_nonce);
 
-                    match &signed.action {
-                        ExchangeAction::Place(request) => {
-                            let o = Self::do_place_order(&who, request.clone())?;
-                            total_matches = total_matches.saturating_add(o.matches);
-                        }
-                        ExchangeAction::Cancel(client_order_id) => {
-                            Self::do_cancel_order(&who, *client_order_id)?;
-                        }
-                        ExchangeAction::CancelUpTo(client_order_id) => {
-                            let mut account = Self::account_of(&who);
-                            if *client_order_id > account.invalid_before {
-                                account.invalid_before = *client_order_id;
-                                Accounts::<T>::insert(&who, signed.subaccount, account);
+                    // The business part, one transaction per action: what it writes is
+                    // committed as a whole or not at all, and the next action in the batch
+                    // starts from whatever this one committed. The nonce above is outside on
+                    // purpose, so a rollback cannot resurrect a consumed signature.
+                    let business: Result<u32, DispatchError> =
+                        frame_support::storage::with_transaction(|| {
+                            let applied: Result<u32, DispatchError> = (|| {
+                                match &signed.action {
+                                    ExchangeAction::Place(request) => {
+                                        let stats = Self::do_place_order(&who, request.clone())?;
+                                        Ok(stats.matches)
+                                    }
+                                    ExchangeAction::Cancel(client_order_id) => {
+                                        Self::do_cancel_order(&who, *client_order_id)?;
+                                        Ok(0)
+                                    }
+                                    ExchangeAction::CancelUpTo(client_order_id) => {
+                                        let mut account = Self::account_of(&who);
+                                        if *client_order_id > account.invalid_before {
+                                            account.invalid_before = *client_order_id;
+                                            Accounts::<T>::insert(
+                                                &who,
+                                                signed.subaccount,
+                                                account,
+                                            );
+                                        }
+                                        Self::deposit_event(Event::OrdersInvalidatedUpTo {
+                                            who: who.clone(),
+                                            client_order_id: *client_order_id,
+                                        });
+                                        Ok(0)
+                                    }
+                                }
+                            })();
+                            match applied {
+                                Ok(matches) => TransactionOutcome::Commit(Ok(matches)),
+                                Err(error) => TransactionOutcome::Rollback(Err(error)),
                             }
-                            Self::deposit_event(Event::OrdersInvalidatedUpTo {
-                                who: who.clone(),
-                                client_order_id: *client_order_id,
-                            });
-                        }
+                        });
+
+                    if let Ok(matches) = business {
+                        total_matches = total_matches.saturating_add(matches);
                     }
-                    Ok(())
+                    business.map(|_| ())
                 })();
 
                 if let Err(error) = outcome {

@@ -2332,6 +2332,126 @@ fn a_signed_action_cannot_be_replayed() {
     });
 }
 
+/// A batch action that fails halfway must not leave half an order behind (S1-2).
+///
+/// `do_place_order` writes as it goes — the maker's account and position first, the taker's
+/// and the market's last. An action that fails between those two used to leave the fill
+/// applied and everything that balanced it missing: a position with no open interest, no fee,
+/// no market update. One transaction per action makes that impossible.
+#[test]
+fn a_half_failed_action_leaves_no_half_applied_state() {
+    new_test_ext().execute_with(|| {
+        setup_traders();
+
+        // ALICE rests a sell the batch action will fill.
+        assert_ok!(ExchangeCore::place_order(
+            RuntimeOrigin::signed(ALICE),
+            gtc(9, Side::Sell, 60_000, 100)
+        ));
+        let (_, maker_order_id) =
+            UserOrderByClientId::<Test>::get((ALICE, DEFAULT_SUBACCOUNT, 9)).unwrap();
+        let maker_order_before = Orders::<Test>::get(MARKET, maker_order_id).unwrap();
+        let level_before = PriceLevels::<Test>::get((MARKET, Side::Sell, 60_000)).unwrap();
+        let fee_pool_before = FeePool::<Test>::get();
+
+        // BOB has no room left for another resting order, and does not know it yet: the batch
+        // action below buys more than ALICE is selling, so it fills and then has a remainder
+        // with nowhere to rest.
+        for id in 1..=16u64 {
+            assert_ok!(ExchangeCore::place_order(
+                RuntimeOrigin::signed(BOB),
+                gtc(id, Side::Buy, 50_000, 1)
+            ));
+        }
+
+        assert_ok!(ExchangeCore::execute_exchange_batch(
+            RuntimeOrigin::none(),
+            BoundedVec::truncate_from(vec![signed_action(
+                BOB,
+                1,
+                ExchangeAction::Place(gtc(30, Side::Buy, 60_001, 150))
+            )])
+        ));
+
+        // The action failed, and nothing it wrote on the way survived: BOB has no position,
+        // ALICE's order is back on the book untouched, the fee pool is unchanged.
+        assert_eq!(
+            Positions::<Test>::get((BOB, DEFAULT_SUBACCOUNT, MARKET))
+                .map(|p| p.size_lots)
+                .unwrap_or(0),
+            0
+        );
+        // ...and so did everything it wrote on the way there: the maker's order is back on
+        // the book untouched, her position never happened, the fee pool is unchanged.
+        let maker_order_after = Orders::<Test>::get(MARKET, maker_order_id).unwrap();
+        assert_eq!(maker_order_after.remaining_lots, maker_order_before.remaining_lots);
+        assert_eq!(maker_order_after.reserved_margin, maker_order_before.reserved_margin);
+        assert_eq!(
+            PriceLevels::<Test>::get((MARKET, Side::Sell, 60_000)).unwrap().total_lots,
+            level_before.total_lots
+        );
+        assert_eq!(
+            Positions::<Test>::get((ALICE, DEFAULT_SUBACCOUNT, MARKET))
+                .map(|p| p.size_lots)
+                .unwrap_or(0),
+            0
+        );
+        assert_eq!(FeePool::<Test>::get(), fee_pool_before);
+
+        // The nonce is still consumed. That is deliberate and the one thing the transaction
+        // does *not* roll back: a signature that failed must not be replayable, so retrying
+        // the same bytes fails differently rather than looking like a new action.
+        assert_eq!(crate::ActionNonce::<Test>::get(BOB, DEFAULT_SUBACCOUNT), 1);
+    });
+}
+
+/// One action's failure must not touch the next one (S1-2).
+///
+/// The batch holds many users' actions, so "skip, do not abort" is the right shape — but only
+/// if skipping is clean. BOB's action above fails after writing; ALICE's runs after it and
+/// must see the state from before BOB, not BOB's leftovers.
+#[test]
+fn a_failed_action_does_not_contaminate_the_next_one() {
+    new_test_ext().execute_with(|| {
+        setup_traders();
+        assert_ok!(ExchangeCore::place_order(
+            RuntimeOrigin::signed(CHARLIE),
+            gtc(1, Side::Sell, 60_000, 100)
+        ));
+        for id in 1..=16u64 {
+            assert_ok!(ExchangeCore::place_order(
+                RuntimeOrigin::signed(BOB),
+                gtc(id, Side::Buy, 50_000, 1)
+            ));
+        }
+
+        assert_ok!(ExchangeCore::execute_exchange_batch(
+            RuntimeOrigin::none(),
+            BoundedVec::truncate_from(vec![
+                signed_action(BOB, 1, ExchangeAction::Place(gtc(30, Side::Buy, 60_001, 150))),
+                signed_action(ALICE, 1, ExchangeAction::Place(gtc(31, Side::Buy, 60_001, 100))),
+            ])
+        ));
+
+        // BOB's half-applied fill is gone: he holds no position...
+        assert_eq!(
+            Positions::<Test>::get((BOB, DEFAULT_SUBACCOUNT, MARKET))
+                .map(|p| p.size_lots)
+                .unwrap_or(0),
+            0
+        );
+        // ...and ALICE's action ran as if it were the only one.
+        assert_eq!(
+            Positions::<Test>::get((ALICE, DEFAULT_SUBACCOUNT, MARKET))
+                .unwrap()
+                .size_lots,
+            100
+        );
+        assert_eq!(crate::ActionNonce::<Test>::get(BOB, DEFAULT_SUBACCOUNT), 1);
+        assert_eq!(crate::ActionNonce::<Test>::get(ALICE, DEFAULT_SUBACCOUNT), 1);
+    });
+}
+
 /// A non-zero sub-account is refused (S0-1).
 ///
 /// The nonce is keyed by `(account, subaccount)` while orders, positions and collateral are

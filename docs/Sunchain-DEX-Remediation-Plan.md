@@ -88,9 +88,18 @@
   新签名域：`(DOMAIN_TAG, version, genesis_hash, subaccount, nonce, expires_at, action)`，Cancel / CancelUpTo 也带统一 expiry。
   改动：`lib.rs:1078`、`lib.rs:2861`（两处必须字节一致）、`types.rs:512`；同步 `node/src/bin/dex-cli.rs`（当前**唯一**构造该 payload 的客户端：`scripts/`、TS、`admin` 均无第二处）。
   测试：golden vector、跨链重放、过期、nonce 缝隙。
-- **S1-2 action 级事务 + nonce 语义（P0-2）**
-  用 `frame_support::storage::with_transaction` 包住单条 action 的**业务**部分；nonce 写入留在事务外（业务失败也消费，防重放），业务失败 → `TransactionOutcome::Rollback`。改动 `lib.rs:1085-1128`。
-  测试：撮合中途失败、`FeePool` 不足、价格失效、风险拒绝、跨 action 互不污染，断言 storage 与执行前逐项相等。
+- **S1-2 action 级事务 + nonce 语义（P0-2）** ✅ 已完成（2026-10-23）
+  用 `frame_support::storage::with_transaction` 包住单条 action 的**业务**部分（Place / Cancel /
+  CancelUpTo），nonce 写入留在事务外：业务失败也消费 nonce（防重放），业务状态全部回滚。
+  改动 `lib.rs` `execute_exchange_batch`。新增 2 个测试：
+  - `a_half_failed_action_leaves_no_half_applied_state`：BOB 的 action 成交后 remainder 无处挂单
+    （`TooManyOpenOrders`），断言 maker 订单回到簿上且数量/保证金不变、maker 与 taker 仓位为 0、
+    FeePool 不变、**nonce 仍被消费**（这是唯一不回滚的东西）；
+  - `a_failed_action_does_not_contaminate_the_next_one`：同 batch 中失败 action 之后的成功
+    action 看到的仍是失败前的状态。
+  测试有效性已反向验证：把 `Rollback` 临时改成 `Commit`（即不回滚）后，第一个测试立即失败
+  （maker 订单消失），恢复后通过。
+
 - **S1-3 canonical 排序（P0-4）**
   `SortKey` 第三分量 `arrival_index` → `action_hash`；`validate_unsigned` 校验 batch 已按 SortKey 升序、同 `(signer, subaccount)` nonce 升序，否则 `InvalidTransaction`。改动 `types.rs:502/528`、`lib.rs:1063-1070`、`lib.rs:643-676`、`node/src/exchange_pool.rs:76-83`。文档改为"段内确定性"，不再承诺 arrival 公平。
 - **S1-4 weight 计量（P1-3）**
@@ -174,7 +183,8 @@
 
 - [x] S0：非零 subaccount 被拒绝；all-features / try-runtime 构建通过；release 产物路径正确
 - [x] S1：签名绑定 version / chain / domain / expiry，并有 golden vector
-- [ ] S1：每条 batch action 具备原子回滚、明确 nonce 语义（业务失败也消费）与 receipt
+- [x] S1：每条 batch action 具备原子回滚、明确 nonce 语义（业务失败也消费）与 receipt
+  （回滚与 nonce 语义已落地；receipt 属 S1-5）
 - [ ] S1：排序规则可由 Runtime 验证，文档不再承诺本地 arrival 公平
 - [ ] S1：batch 实际 weight 与治理遍历 weight 与 benchmark 同维度
 - [ ] S2：P2P 限流不依赖收到消息数，含 peer / account 配额与大小检查
