@@ -850,6 +850,7 @@ pub async fn new_full_base<N: NetworkBackend<Block, <Block as sp_runtime::traits
             ),
             exchange_pool.clone(),
             transaction_pool.clone(),
+            prometheus_registry.as_ref(),
         );
 
         let client_clone = client.clone();

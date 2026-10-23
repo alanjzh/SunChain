@@ -199,7 +199,7 @@
 | S2-1 | ✅ 限流窗口改**块高**推进（不再由收到消息数推进——那正是可被绕过的原因）；参数改为真正生效的配额；key 扩为 `(peer, account)` 双维 + per-peer 字节预算 + 坏包预算 | `node/src/exchange_p2p.rs` |
 | S2-2 | ✅ 已完成（2026-10-23）：随 S2-1 落地的解码前大小检查 + seen 仅在解码成功后占用；本次把 seen 的 key 从"整个 payload 字节"改为**语义** `(signer, subaccount, nonce)`——同一 action 被重签（字节不同）仍被识别为重复，不会被二次中继；本地提交路径也用同一语义键去重 | `node/src/exchange_p2p.rs` |
 | S2-3 | ✅ 已完成（2026-10-23）：从 `pending()`（已是 canonical 排序）逐条尝试，逐项检查四个预算——action 数（`MAX_EXCHANGE_BATCH_ACTIONS=8`）、每市场配额（`MAX_ACTIONS_PER_MARKET_PER_BATCH=4`，避免一个热市场占满整批）、SCALE 字节（`MAX_EXCHANGE_BATCH_BYTES=32KiB`）、权重（`MAX_EXCHANGE_BATCH_WEIGHT=1e12`，留足块内余量）。每一项被排除都记日志（含 signer/nonce/原因）。**偏差**：计划写的"`action_weight` API / block 剩余预算"未接实时 API——该 API 在泛型 proposer 里无法让 `at` 的 `Block` 类型推断（仅对具体 `FullClient` 可推断，如 `service.rs`），故改用静态最坏值 `MAX_EXCHANGE_ACTION_WEIGHT`（1.1e11/动作）；权威的超重拦截仍是 runtime 的声明权重检查（S1-4，8 动作批已被证可入块） | `node/src/exchange_proposer.rs` |
-| S2-4 | 未纳入原因的日志与 Prometheus 指标（当前 0 个 exchange 专用指标） | `exchange_proposer.rs`、`service.rs` |
+| S2-4 | ✅ 已完成（2026-10-23）：在 `ExchangeProposerFactory` 接 `Registry`，新增 `ExchangeMetrics`——`exchange_actions_proposed_total`、`exchange_actions_deferred_total{reason}`（reason ∈ action_count/market_count/bytes/weight）、`exchange_batch_bytes` 直方图。每有 pending 的块都记录被选/被递延（含原因）；批 extrinsic 构造成功时记字节大小。无 registry 时计数仍在内存累加不报错。测试覆盖注册后取值与无 registry 不 panic | `node/src/exchange_proposer.rs`、`node/Cargo.toml`、`node/src/service.rs` |
 | S2-5 | RPC `exchange_actionStatus(signer, subaccount, nonce)`：未入池 / 已入块 / 已拒绝 / 已回退。**Runtime API 已就绪**（S1-5 的 `ExchangeRuntimeApi::action_receipts`），node 侧只需包一层 | `node/src/rpc/exchange.rs` |
 | S2-6 | pool 持久化或重传（现在是纯内存 `BTreeMap`，重启全丢；prune 任务只删不重播） | `node/src/exchange_pool.rs:33`、`service.rs:698-743` |
 

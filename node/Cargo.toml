@@ -61,6 +61,7 @@ sc-offchain.default-features = true
 sc-offchain.workspace = true
 sc-service.default-features = true
 sc-service.workspace = true
+prometheus-endpoint.workspace = true
 sc-telemetry.default-features = true
 sc-telemetry.workspace = true
 sc-transaction-pool-api.default-features = true

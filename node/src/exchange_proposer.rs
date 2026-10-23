@@ -15,6 +15,7 @@
 use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc, time::Duration};
 
 use scale_codec::{Decode, Encode};
+use prometheus_endpoint::prometheus::{Counter, CounterVec, Histogram, HistogramOpts, Opts, Registry};
 use sc_transaction_pool_api::{TransactionPool, TransactionSource};
 use sp_consensus::{Environment, Proposer, Proposal};
 use sp_runtime::{
@@ -62,6 +63,18 @@ pub enum Exclusion {
 	Bytes,
 	/// Adding it would have exceeded the batch weight budget.
 	Weight,
+}
+
+impl Exclusion {
+	/// Prometheus label for the reason an action was deferred.
+	pub fn label(self) -> &'static str {
+		match self {
+			Exclusion::ActionCount => "action_count",
+			Exclusion::MarketCount => "market_count",
+			Exclusion::Bytes => "bytes",
+			Exclusion::Weight => "weight",
+		}
+	}
 }
 
 /// The bounds a batch is built against (S2-3).
@@ -137,16 +150,93 @@ fn market_of(action: &ExchangeSignedAction) -> Option<u32> {
 	}
 }
 
+/// Prometheus metrics for the exchange batch builder (S2-4).
+///
+/// Registered against the node's registry when one is configured; otherwise the counters still
+/// increment in memory (they just are not exported). They are the observable half of what the
+/// log lines say: how many actions were proposed, how many were deferred and *why*, and how big
+/// the resulting batch was.
+pub struct ExchangeMetrics {
+	actions_proposed: Counter,
+	actions_deferred: CounterVec,
+	batch_bytes: Histogram,
+}
+
+impl ExchangeMetrics {
+	pub fn new(registry: Option<&Registry>) -> Self {
+		let actions_proposed = Counter::new(
+			"exchange_actions_proposed_total",
+			"Exchange actions included in a proposed batch.",
+		)
+		.expect("metric name is valid");
+		let actions_deferred = CounterVec::new(
+			Opts::new(
+				"exchange_actions_deferred_total",
+				"Exchange actions left out of a batch, by reason.",
+			),
+			&["reason"],
+		)
+		.expect("metric name and labels are valid");
+		let batch_bytes = Histogram::with_opts(
+			HistogramOpts::new("exchange_batch_bytes", "Encoded size of a proposed batch extrinsic.")
+				.buckets(vec![256.0, 512.0, 1024.0, 2048.0, 4096.0, 8192.0, 16384.0, 32768.0]),
+		)
+		.expect("metric name is valid");
+
+		if let Some(registry) = registry {
+			// Registration can fail only if a metric with the same name already exists; that
+			// would be a programming error, not a runtime condition, so a log is enough.
+			let _ = registry.register(Box::new(actions_proposed.clone()));
+			let _ = registry.register(Box::new(actions_deferred.clone()));
+			let _ = registry.register(Box::new(batch_bytes.clone()));
+		}
+		Self { actions_proposed, actions_deferred, batch_bytes }
+	}
+
+	/// Records how many actions were proposed and, for each deferred one, the reason. Called
+	/// on every block that had pending actions, so the counters reflect the selection even when
+	/// the batch extrinsic fails to build.
+	fn record_selection(&self, selected: usize, excluded: &[(ExchangeSignedAction, Exclusion)]) {
+		for _ in 0..selected {
+			self.actions_proposed.inc();
+		}
+		for (_, reason) in excluded {
+			self.actions_deferred.with_label_values(&[reason.label()]).inc();
+		}
+	}
+
+	/// Records the encoded size of the batch extrinsic that was actually built.
+	fn record_batch_size(&self, bytes: usize) {
+		self.batch_bytes.observe(bytes as f64);
+	}
+}
+
+impl Clone for ExchangeMetrics {
+	fn clone(&self) -> Self {
+		Self {
+			actions_proposed: self.actions_proposed.clone(),
+			actions_deferred: self.actions_deferred.clone(),
+			batch_bytes: self.batch_bytes.clone(),
+		}
+	}
+}
+
 /// Wraps the node's real proposer factory, injecting one exchange batch per slot.
 pub struct ExchangeProposerFactory<E, P> {
 	inner: E,
 	exchange: Arc<std::sync::Mutex<ExchangePool>>,
 	pool: Arc<P>,
+	metrics: ExchangeMetrics,
 }
 
 impl<E, P> ExchangeProposerFactory<E, P> {
-	pub fn new(inner: E, exchange: Arc<std::sync::Mutex<ExchangePool>>, pool: Arc<P>) -> Self {
-		Self { inner, exchange, pool }
+	pub fn new(
+		inner: E,
+		exchange: Arc<std::sync::Mutex<ExchangePool>>,
+		pool: Arc<P>,
+		registry: Option<&Registry>,
+	) -> Self {
+		Self { inner, exchange, pool, metrics: ExchangeMetrics::new(registry) }
 	}
 }
 
@@ -165,9 +255,10 @@ where
 		let inner = self.inner.init(parent_header);
 		let exchange = self.exchange.clone();
 		let pool = self.pool.clone();
+		let metrics = self.metrics.clone();
 		let parent_hash = parent_header.hash();
 		Box::pin(async move {
-			Ok(ExchangeProposer { inner: inner.await?, parent_hash, exchange, pool })
+			Ok(ExchangeProposer { inner: inner.await?, parent_hash, exchange, pool, metrics })
 		})
 	}
 }
@@ -178,6 +269,7 @@ pub struct ExchangeProposer<B: BlockT, P, TP> {
 	parent_hash: B::Hash,
 	exchange: Arc<std::sync::Mutex<ExchangePool>>,
 	pool: Arc<TP>,
+	metrics: ExchangeMetrics,
 }
 
 impl<B, P, TP> Proposer<B> for ExchangeProposer<B, P, TP>
@@ -200,7 +292,7 @@ where
 		max_duration: Duration,
 		block_size_limit: Option<usize>,
 	) -> Self::Proposal {
-		let Self { inner, parent_hash, exchange, pool } = self;
+		let Self { inner, parent_hash, exchange, pool, metrics } = self;
 
 		// Read, do not remove: an action stays queued until a background task sees the
 		// chain consume it. Taking it here would lose it whenever this block is discarded.
@@ -235,11 +327,16 @@ where
 					}
 				}
 
+				// Record the selection on every block that had pending actions, so the counters
+				// reflect it even if wrapping the batch bytes fails below.
+				metrics.record_selection(selected.len(), &excluded);
+
 				if !selected.is_empty() {
 					log::info!(target: "exchange",
 						"proposing with {} queued action(s)", selected.len());
 					match unsigned_batch(selected) {
 						Some(xt) => {
+							metrics.record_batch_size(xt.encoded_size());
 							let before = pool.status().ready;
 							let res =
 								pool.submit_one(parent_hash, TransactionSource::Local, xt).await;
@@ -439,4 +536,74 @@ mod tests {
 		assert_eq!(selected.len(), 0, "the first action alone exceeds a 1-byte budget");
 		assert!(excluded.iter().all(|(_, r)| *r == Exclusion::Bytes));
 	}
+
+	/// Metrics actually register and count (S2-4).
+	#[test]
+	fn metrics_record_proposed_and_deferred() {
+		let registry = Registry::default();
+		let m = ExchangeMetrics::new(Some(&registry));
+
+		let deferred = vec![(place(1, 1, MARKET), Exclusion::MarketCount), (place(2, 1, MARKET), Exclusion::Weight)];
+		m.record_selection(3, &deferred);
+		m.record_batch_size(1234);
+
+		// The proposed counter should read 3.
+		assert_eq!(counter_value(&registry, "exchange_actions_proposed_total", None), Some(3.0));
+		// The deferred counter, labelled by reason, should read per reason.
+		assert_eq!(
+			counter_value(&registry, "exchange_actions_deferred_total", Some(("reason", "market_count"))),
+			Some(1.0)
+		);
+		assert_eq!(
+			counter_value(&registry, "exchange_actions_deferred_total", Some(("reason", "weight"))),
+			Some(1.0)
+		);
+		// The batch-size histogram should have recorded one observation.
+		assert!(histogram_count(&registry, "exchange_batch_bytes") >= 1);
+	}
+
+	/// Without a registry the metrics still construct and increment in memory (no panic).
+	#[test]
+	fn metrics_work_without_a_registry() {
+		let m = ExchangeMetrics::new(None);
+		let deferred = vec![(place(1, 1, MARKET), Exclusion::ActionCount)];
+		m.record_selection(2, &deferred);
+		m.record_batch_size(10);
+	}
+}
+
+/// Reads a counter's value from a registry by metric name, optionally filtering on a label.
+fn counter_value(
+	registry: &Registry,
+	name: &str,
+	label: Option<(&str, &str)>,
+) -> Option<f64> {
+	for family in registry.gather() {
+		if family.get_name() != name {
+			continue
+		}
+		for metric in family.get_metric() {
+			if let Some((key, val)) = label {
+				let has = metric
+					.get_label()
+					.iter()
+					.any(|l| l.get_name() == key && l.get_value() == val);
+				if !has {
+					continue
+				}
+			}
+			return Some(metric.get_counter().get_value())
+		}
+	}
+	None
+}
+
+/// Counts how many observations a histogram has recorded.
+fn histogram_count(registry: &Registry, name: &str) -> u64 {
+	for family in registry.gather() {
+		if family.get_name() == name {
+			return family.get_metric().iter().map(|m| m.get_histogram().get_sample_count()).sum()
+		}
+	}
+	0
 }
