@@ -265,9 +265,9 @@ extrinsic 在 validate 阶段就被拒（`InvalidTransaction::ExhaustsResources`
 - [x] S1：排序规则可由 Runtime 验证，文档不再承诺本地 arrival 公平
 - [x] S1：batch 实际 weight 与治理遍历 weight 与 benchmark 同维度
   （维度与 benchmark 已就位；`weights.rs` 数字仍待 `frame-benchmarking-cli` 重跑）
-- [ ] S2：P2P 限流不依赖收到消息数，含 peer / account 配额与大小检查
-- [ ] S2：batch 按 action 数、字节、weight、市场预算显式选择，未纳入有指标
-- [ ] S2：失败结果可通过 RPC 查询，并有告警与指标
+- [x] S2：P2P 限流不依赖收到消息数，含 peer / account 双维配额、字节预算、坏包预算与解码前大小检查（S2-1）；seen 改语义键（S2-2）
+- [x] S2：batch 按 action 数、字节、weight、市场预算显式选择，被排除项带原因日志 + Prometheus 指标（S2-3 / S2-4）
+- [x] S2：失败结果可通过 RPC 查询（`exchange_actionReceipts` / `exchange_actionStatus`，由 S1-5 receipt 派生），并有 metrics（S2-5）；pool 持久化重启不丢（S2-6）
 - [ ] S3：非零 subaccount 被完整支持（此时移除 S0 的拒绝分支）
 - [ ] S3：ADL 候选语义被明确声明（best-effort 或可验证全局前 N）
 - [ ] S3：default / WASM / runtime-benchmarks / try-runtime / all-features 全部通过
