@@ -118,8 +118,27 @@
   - 反向验证：删掉顺序校验 → 第一个测试失败；去掉 dispatchable 内排序 → 第二个测试失败。
 
 - **S1-4 weight 计量（P1-3）**
-- **S1-4 weight 计量（P1-3）**
-  累计 `MatchStats{matches, stale_removed, level_scans}` 三项；`WeightInfo::execute_batch` 增加 `level_scans` 维度并重跑 benchmark（现有 benchmark 只放 resting 单且用 `RawOrigin::Signed`，与 `ensure_none` 不符）；`set_liquidity_tier` 独立 weight + benchmark。改动 `lib.rs:1072/1092/1123`、`weights.rs:37/141`、`benchmarking.rs:403`、`lib.rs:982`。
+- **S1-4 weight 计量（P1-3）** ✅ 已完成（2026-10-23）
+  - `execute_exchange_batch` 现在累计 `MatchStats` 的**三项**（`matches` / `stale_removed` /
+    `level_scans`），事务闭包直接返回 `MatchStats`；回滚的 action 不计入（不为没发生的
+    工作收费）。此前 `stale_removed` 硬编码 `0`、`level_scans` 整个丢弃，而 signed 版
+    `execute_batch` 三个都传——所以那是个遗漏，不是设计。
+  - `WeightInfo::execute_batch` 增加第四维 `level_scans`（trait、`execute_batch_weight!`
+    宏、`()` 与 `SubstrateWeight` 两个 impl、两处调用、两处 `#[pallet::weight]` 声明上界
+    `MaxActionsPerBatch × MaxPriceLevelsPerSide`）。
+  - `set_liquidity_tier` 不再借用 `create_market()` 的平铺权重：新增
+    `WeightInfo::set_liquidity_tier(markets)`（base + 每市场 读1 写1），dispatchable 返回
+    `DispatchResultWithPostInfo` 并按**实际刷新的市场数**退款。
+  - benchmark：新增 `execute_batch_matching`（ resting 卖单 + 全部成交的 batch，覆盖
+    matches/stale/level-scan 三维，旧 benchmark 只有 resting）与 `set_liquidity_tier`
+    （按市场数线性）。`bench_set_liquidity_tier` 测试通过；`execute_batch_matching` 与所有
+    既有 place/cancel benchmark 一样在测试模式下因 `MarkPriceStale` 失败（mock 的 oracle 不
+    提供价格，只有真实 benchmark CLI 才注入）——预存在问题，非本次引入。真实数字需跑
+    `frame-benchmarking-cli` 重新生成 `weights.rs`。
+  - 新测试：`the_batch_weight_covers_what_it_did`（三个维度各自使 weight 增长 + tier 按
+    市场数增长）、`a_matching_batch_reports_more_than_a_resting_one`（成交 batch、以及
+    **只做 stale 移除**的 batch，报告的 weight 都高于只挂单的 batch）。反向验证：把
+    `stale_removed`/`level_scans` 重新丢掉（旧行为）后，stale 断言立即失败。
 - **S1-5 最小可用 receipt（P1-5 第一步）**
   新增**有界** `ActionReceipts`：`(signer, subaccount) -> BoundedVec<(nonce, status, error_code, block)>`，`on_initialize` 按 TTL 清理；receipt 带 `nonce_consumed` 字段。
 
@@ -202,7 +221,8 @@
 - [x] S1：每条 batch action 具备原子回滚、明确 nonce 语义（业务失败也消费）与 receipt
   （回滚与 nonce 语义已落地；receipt 属 S1-5）
 - [x] S1：排序规则可由 Runtime 验证，文档不再承诺本地 arrival 公平
-- [ ] S1：batch 实际 weight 与治理遍历 weight 与 benchmark 同维度
+- [x] S1：batch 实际 weight 与治理遍历 weight 与 benchmark 同维度
+  （维度与 benchmark 已就位；`weights.rs` 数字仍待 `frame-benchmarking-cli` 重跑）
 - [ ] S2：P2P 限流不依赖收到消息数，含 peer / account 配额与大小检查
 - [ ] S2：batch 按 action 数、字节、weight、市场预算显式选择，未纳入有指标
 - [ ] S2：失败结果可通过 RPC 查询，并有告警与指标

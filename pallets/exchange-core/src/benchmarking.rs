@@ -112,6 +112,17 @@ fn install_market<T: Config>() {
     PrimaryMarketId::<T>::put(BENCH_MARKET);
 }
 
+/// The same market, on a given tier, so a tier refresh has something to refresh (S1-4).
+fn bench_market_with_tier<T: Config>(
+    market_id: MarketId,
+    tier_id: u32,
+) -> Market<frame_system::pallet_prelude::BlockNumberFor<T>> {
+    let mut market = bench_market::<T>();
+    market.liquidity_tier = tier_id;
+    let _ = market_id;
+    market
+}
+
 fn to_balance<T: Config>(amount: QuoteAmount) -> Result<T::Balance, BenchmarkError> {
     amount
         .try_into()
@@ -419,6 +430,64 @@ mod benchmarks {
 
         #[extrinsic_call]
         execute_batch(RawOrigin::Signed(caller), actions);
+    }
+
+    /// The same batch, but every action *matches*: a resting sell is on the book first, so the
+    /// matches / stale / level-scan dimensions of the weight are exercised rather than only
+    /// the resting path (S1-4). Without it the synthesised weight covered only a batch of
+    /// orders that rest.
+    #[benchmark]
+    fn execute_batch_matching(a: Linear<1, 8>) {
+        let maker: T::AccountId = account("maker", 0, 0);
+        let caller: T::AccountId = whitelisted_caller();
+        install_market::<T>();
+        setup_account::<T>(&maker, DEPOSIT);
+        setup_account::<T>(&caller, DEPOSIT);
+        // Deep enough that every action in the batch can fill.
+        Pallet::<T>::place_order(
+            RawOrigin::Signed(maker).into(),
+            resting_request::<T>(1, Side::Sell, 50_000, (a as Lots).saturating_mul(10)),
+        )
+        .expect("the resting sell must place");
+        let a = a.min(T::MaxActionsPerBatch::get());
+        let mut actions = alloc::vec::Vec::new();
+        for i in 0..a {
+            actions.push(ExchangeAction::Place(resting_request::<T>(
+                i as ClientOrderId + 2,
+                Side::Buy,
+                50_000,
+                10,
+            )));
+        }
+        let actions: BoundedVec<_, T::MaxActionsPerBatch> = BoundedVec::truncate_from(actions);
+
+        #[extrinsic_call]
+        execute_batch(RawOrigin::Signed(caller), actions);
+    }
+
+    /// `set_liquidity_tier` (S1-4): a flat call that iterates every market on the tier.
+    ///
+    /// It used to borrow `create_market()`'s weight — a single market write — so the number of
+    /// markets refreshed was invisible to the block budget.
+    #[benchmark]
+    fn set_liquidity_tier(m: Linear<1, { T::MaxMarkets::get() }>) {
+        let tier = LiquidityTier {
+            name: *b"bench   ",
+            initial_margin_ppm: 100_000,
+            maintenance_margin_ppm: 50_000,
+            impact_notional_quote: 500_000_000,
+        };
+        crate::LiquidityTiers::<T>::insert(0u32, tier);
+        for id in 0..m {
+            Markets::<T>::insert(
+                id as MarketId,
+                bench_market_with_tier::<T>(id as MarketId, 0),
+            );
+        }
+        NextMarketId::<T>::put(m as MarketId);
+
+        #[extrinsic_call]
+        set_liquidity_tier(RawOrigin::Root, 0u32, tier);
     }
 
     #[benchmark]

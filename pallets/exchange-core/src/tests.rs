@@ -2495,6 +2495,90 @@ fn a_failed_action_does_not_contaminate_the_next_one() {
     });
 }
 
+/// The batch's weight covers the work it actually did (S1-4).
+///
+/// It used to report `stale_removed = 0` and drop level scans entirely, so a batch full of
+/// matches was charged as if it had only rested — while the signed `execute_batch` passed all
+/// three dimensions. The tier refresh used to borrow `create_market()`'s flat weight while
+/// iterating every market on the tier.
+#[test]
+fn the_batch_weight_covers_what_it_did() {
+    use crate::weights::WeightInfo;
+
+    let resting = <() as WeightInfo>::execute_batch(1, 0, 0, 0);
+    let matched = <() as WeightInfo>::execute_batch(1, 1, 0, 0);
+    let stale = <() as WeightInfo>::execute_batch(1, 0, 1, 0);
+    let scanned = <() as WeightInfo>::execute_batch(1, 0, 0, 1);
+
+    assert!(matched.ref_time() > resting.ref_time(), "a match must cost something");
+    assert!(stale.ref_time() > resting.ref_time(), "a stale removal must cost something");
+    assert!(scanned.ref_time() > resting.ref_time(), "a level scan must cost something");
+
+    let one_market = <() as WeightInfo>::set_liquidity_tier(1);
+    let two_markets = <() as WeightInfo>::set_liquidity_tier(2);
+    assert!(
+        two_markets.ref_time() > one_market.ref_time(),
+        "a tier refresh must cost per market, not a flat call's worth"
+    );
+}
+
+/// The weight a real batch reports grows with what it executed (S1-4).
+#[test]
+fn a_matching_batch_reports_more_than_a_resting_one() {
+    new_test_ext().execute_with(|| {
+        setup_traders();
+        assert_ok!(ExchangeCore::place_order(
+            RuntimeOrigin::signed(CHARLIE),
+            gtc(1, Side::Sell, 60_000, 100)
+        ));
+
+        let reported = |action| {
+            ExchangeCore::execute_exchange_batch(
+                RuntimeOrigin::none(),
+                BoundedVec::truncate_from(vec![action]),
+            )
+            .expect("the batch dispatches")
+            .actual_weight
+            .expect("the batch reports its weight")
+        };
+
+        let resting = reported(signed_action(
+            ALICE,
+            1,
+            ExchangeAction::Place(gtc(9, Side::Buy, 50_000, 1)),
+        ));
+        let matching = reported(signed_action(
+            BOB,
+            1,
+            ExchangeAction::Place(gtc(8, Side::Buy, 60_001, 10)),
+        ));
+
+        assert!(
+            matching.ref_time() > resting.ref_time(),
+            "a batch that matched must not report the weight of one that only rested"
+        );
+
+        // And a batch whose only work is removing a stale maker. Its weight used to be
+        // computed with `stale_removed = 0`, which made this cost exactly what resting costs.
+        let (_, maker_order_id) =
+            UserOrderByClientId::<Test>::get((CHARLIE, DEFAULT_SUBACCOUNT, 1)).unwrap();
+        crate::Orders::<Test>::mutate(MARKET, maker_order_id, |order| {
+            if let Some(order) = order {
+                order.expires_at = System::block_number();
+            }
+        });
+        let stale_removal = reported(signed_action(
+            ALICE,
+            2,
+            ExchangeAction::Place(gtc(10, Side::Buy, 60_001, 100)),
+        ));
+        assert!(
+            stale_removal.ref_time() > resting.ref_time(),
+            "removing a stale maker must cost more than resting"
+        );
+    });
+}
+
 /// A non-zero sub-account is refused (S0-1).
 ///
 /// The nonce is keyed by `(account, subaccount)` while orders, positions and collateral are

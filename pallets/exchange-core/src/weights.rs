@@ -34,9 +34,19 @@ pub trait WeightInfo {
 	fn place_order(matches: u32, stale_removed: u32, level_scan: u32) -> Weight;
 	fn cancel_order() -> Weight;
 	fn cancel_up_to() -> Weight;
-	fn execute_batch(actions: u32, matches: u32, stale_removed: u32) -> Weight;
+	/// `execute_batch`: per action, per executed match, per stale removal, per price level
+	/// walked (S1-4 added the last two; the batch used to report `stale_removed = 0` and drop
+	/// level scans, so a batch of stale removals was charged for none of that work).
+	fn execute_batch(
+		actions: u32,
+		matches: u32,
+		stale_removed: u32,
+		level_scans: u32,
+	) -> Weight;
 	fn prune_orders(removed: u32) -> Weight;
 	fn create_market() -> Weight;
+	/// `set_liquidity_tier`: base plus one market refreshed (S1-4).
+	fn set_liquidity_tier(markets: u32) -> Weight;
 	fn set_market_status() -> Weight;
 	fn set_mark_price() -> Weight;
 	fn set_risk_params() -> Weight;
@@ -86,6 +96,19 @@ const PER_ACTION_REF: u64 = 110_384_995;
 const PER_ACTION_PROOF: u64 = 2_584;
 const PER_ACTION_READS: u64 = 2;
 const PER_ACTION_WRITES: u64 = 3;
+
+/// `set_liquidity_tier` (S1-4). **Hand-written, not measured** — same status as the other
+/// governance calls in this file until step 8 of the implementation plan. The base is a
+/// bounded iteration over every market key on the tier; each refreshed market is one read
+/// plus one write. `cargo benchmark` produces the real numbers.
+const SET_LIQUIDITY_TIER_BASE_REF: u64 = 60_000_000;
+const SET_LIQUIDITY_TIER_BASE_PROOF: u64 = 3_636;
+const SET_LIQUIDITY_TIER_BASE_READS: u64 = 3;
+const SET_LIQUIDITY_TIER_BASE_WRITES: u64 = 2;
+const PER_MARKET_REFRESH_REF: u64 = 45_000_000;
+const PER_MARKET_REFRESH_PROOF: u64 = 2_621;
+const PER_MARKET_REFRESH_READS: u64 = 1;
+const PER_MARKET_REFRESH_WRITES: u64 = 1;
 
 /// `prune_orders`.
 const PRUNE_BASE_REF: u64 = 35_700_652;
@@ -139,33 +162,57 @@ macro_rules! place_order_weight {
 }
 
 macro_rules! execute_batch_weight {
-	($db:expr, $a:expr, $m:expr, $s:expr) => {{
+	($db:expr, $a:expr, $m:expr, $s:expr, $l:expr) => {{
 		let db = $db;
 		let a = $a as u64;
 		let m = $m as u64;
 		let s = $s as u64;
+		let l = $l as u64;
 		Weight::from_parts(BATCH_BASE_REF, 0)
 			.saturating_add(Weight::from_parts(PER_ACTION_REF.saturating_mul(a), 0))
 			.saturating_add(Weight::from_parts(PER_MATCH_REF.saturating_mul(m), 0))
 			.saturating_add(Weight::from_parts(PER_STALE_REF.saturating_mul(s), 0))
+			.saturating_add(Weight::from_parts(PER_LEVEL_SCAN_REF.saturating_mul(l), 0))
 			.saturating_add(Weight::from_parts(
 				0,
 				BATCH_BASE_PROOF
 					.saturating_add(PER_ACTION_PROOF.saturating_mul(a))
 					.saturating_add(PER_MATCH_PROOF.saturating_mul(m))
-					.saturating_add(PER_STALE_PROOF.saturating_mul(s)),
+					.saturating_add(PER_STALE_PROOF.saturating_mul(s))
+					.saturating_add(PER_LEVEL_SCAN_PROOF.saturating_mul(l)),
 			))
 			.saturating_add(db.reads(
 				BATCH_BASE_READS
 					.saturating_add(PER_ACTION_READS.saturating_mul(a))
 					.saturating_add(PER_MATCH_READS.saturating_mul(m))
-					.saturating_add(PER_STALE_READS.saturating_mul(s)),
+					.saturating_add(PER_STALE_READS.saturating_mul(s))
+					.saturating_add(PER_LEVEL_SCAN_READS.saturating_mul(l)),
 			))
 			.saturating_add(db.writes(
 				BATCH_BASE_WRITES
 					.saturating_add(PER_ACTION_WRITES.saturating_mul(a))
 					.saturating_add(PER_MATCH_WRITES.saturating_mul(m))
 					.saturating_add(PER_STALE_WRITES.saturating_mul(s)),
+			))
+	}};
+}
+
+macro_rules! set_liquidity_tier_weight {
+	($db:expr, $n:expr) => {{
+		let db = $db;
+		let n = $n as u64;
+		Weight::from_parts(SET_LIQUIDITY_TIER_BASE_REF, SET_LIQUIDITY_TIER_BASE_PROOF)
+			.saturating_add(Weight::from_parts(
+				PER_MARKET_REFRESH_REF.saturating_mul(n),
+				PER_MARKET_REFRESH_PROOF.saturating_mul(n),
+			))
+			.saturating_add(db.reads(
+				SET_LIQUIDITY_TIER_BASE_READS
+					.saturating_add(PER_MARKET_REFRESH_READS.saturating_mul(n)),
+			))
+			.saturating_add(db.writes(
+				SET_LIQUIDITY_TIER_BASE_WRITES
+					.saturating_add(PER_MARKET_REFRESH_WRITES.saturating_mul(n)),
 			))
 	}};
 }
@@ -225,14 +272,22 @@ impl WeightInfo for () {
 	fn cancel_up_to() -> Weight {
 		flat!(RocksDbWeight::get(), 74_250_000, 3_562, 2, 2)
 	}
-	fn execute_batch(actions: u32, matches: u32, stale_removed: u32) -> Weight {
-		execute_batch_weight!(RocksDbWeight::get(), actions, matches, stale_removed)
+	fn execute_batch(
+		actions: u32,
+		matches: u32,
+		stale_removed: u32,
+		level_scans: u32,
+	) -> Weight {
+		execute_batch_weight!(RocksDbWeight::get(), actions, matches, stale_removed, level_scans)
 	}
 	fn prune_orders(removed: u32) -> Weight {
 		prune_orders_weight!(RocksDbWeight::get(), removed)
 	}
 	fn create_market() -> Weight {
 		flat!(RocksDbWeight::get(), 63_035_000, 3_636, 3, 3)
+	}
+	fn set_liquidity_tier(markets: u32) -> Weight {
+		set_liquidity_tier_weight!(RocksDbWeight::get(), markets)
 	}
 	fn set_market_status() -> Weight {
 		flat!(RocksDbWeight::get(), 54_588_000, 3_636, 1, 1)
@@ -285,14 +340,22 @@ impl<T: Config> WeightInfo for SubstrateWeight<T> {
 	fn cancel_up_to() -> Weight {
 		flat!(T::DbWeight::get(), 74_250_000, 3_562, 2, 2)
 	}
-	fn execute_batch(actions: u32, matches: u32, stale_removed: u32) -> Weight {
-		execute_batch_weight!(T::DbWeight::get(), actions, matches, stale_removed)
+	fn execute_batch(
+		actions: u32,
+		matches: u32,
+		stale_removed: u32,
+		level_scans: u32,
+	) -> Weight {
+		execute_batch_weight!(T::DbWeight::get(), actions, matches, stale_removed, level_scans)
 	}
 	fn prune_orders(removed: u32) -> Weight {
 		prune_orders_weight!(T::DbWeight::get(), removed)
 	}
 	fn create_market() -> Weight {
 		flat!(T::DbWeight::get(), 63_035_000, 3_636, 3, 3)
+	}
+	fn set_liquidity_tier(markets: u32) -> Weight {
+		set_liquidity_tier_weight!(T::DbWeight::get(), markets)
 	}
 	fn set_market_status() -> Weight {
 		flat!(T::DbWeight::get(), 54_588_000, 3_636, 1, 1)

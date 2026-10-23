@@ -946,6 +946,8 @@ pub mod pallet {
 			T::MaxActionsPerBatch::get(),
 			T::MaxActionsPerBatch::get().saturating_mul(T::MaxMatchesPerAction::get()),
 			T::MaxActionsPerBatch::get().saturating_mul(T::MaxMatchesPerAction::get()),
+			// Every action may rest, and resting walks the price chain (S1-4).
+			T::MaxActionsPerBatch::get().saturating_mul(T::MaxPriceLevelsPerSide::get()),
 		))]
         pub fn execute_batch(
             origin: OriginFor<T>,
@@ -986,8 +988,12 @@ pub mod pallet {
                 }
             }
 
-            let actual =
-                T::WeightInfo::execute_batch(actions.len() as u32, total_matches, total_stale);
+            let actual = T::WeightInfo::execute_batch(
+                actions.len() as u32,
+                total_matches,
+                total_stale,
+                total_scans,
+            );
             Self::consume_block_budget(actual)?;
             Ok(PostDispatchInfo {
                 actual_weight: Some(actual),
@@ -1014,12 +1020,15 @@ pub mod pallet {
         /// position on those markets at once, which is exactly what the governance design
         /// note (worklog 2026-09-18) wants a separate, slower process for.
         #[pallet::call_index(16)]
-        #[pallet::weight(T::WeightInfo::create_market())]
+        // Its own weight, dimensioned by the number of markets the refresh can touch (S1-4).
+        // It used to borrow `create_market()`, a flat call, while iterating every market on
+        // the tier — so a tier with a hundred markets was charged for none of them.
+        #[pallet::weight(T::WeightInfo::set_liquidity_tier(T::MaxMarkets::get()))]
         pub fn set_liquidity_tier(
             origin: OriginFor<T>,
             tier_id: u32,
             tier: LiquidityTier,
-        ) -> DispatchResult {
+        ) -> DispatchResultWithPostInfo {
             T::ForceOrigin::ensure_origin(origin)?;
             ensure!(
                 tier.maintenance_margin_ppm > 0
@@ -1041,7 +1050,12 @@ pub mod pallet {
                 updated = updated.saturating_add(1);
             }
             Self::deposit_event(Event::LiquidityTierUpdated { tier_id, markets_updated: updated });
-            Ok(())
+            // Refund what was not used: the declared weight covers every market, but a tier
+            // that only some markets use should not be charged for all of them.
+            Ok(PostDispatchInfo {
+                actual_weight: Some(T::WeightInfo::set_liquidity_tier(updated)),
+                pays_fee: Pays::Yes,
+            })
         }
 
         #[pallet::call_index(15)]
@@ -1073,10 +1087,13 @@ pub mod pallet {
 
         #[pallet::call_index(14)]
         #[pallet::weight(T::WeightInfo::execute_batch(
-		T::MaxActionsPerBatch::get(),
-		T::MaxActionsPerBatch::get().saturating_mul(T::MaxMatchesPerAction::get()),
-		T::MaxActionsPerBatch::get().saturating_mul(T::MaxMatchesPerAction::get()),
-	))]
+            T::MaxActionsPerBatch::get(),
+            T::MaxActionsPerBatch::get().saturating_mul(T::MaxMatchesPerAction::get()),
+            T::MaxActionsPerBatch::get().saturating_mul(T::MaxMatchesPerAction::get()),
+            // Every action may rest, and resting walks the price chain: the third dimension
+            // of the same work, which the declared weight used to leave out entirely (S1-4).
+            T::MaxActionsPerBatch::get().saturating_mul(T::MaxPriceLevelsPerSide::get()),
+        ))]
         pub fn execute_exchange_batch(
             origin: OriginFor<T>,
             actions: BoundedVec<
@@ -1107,6 +1124,12 @@ pub mod pallet {
             ordered.sort_by_key(|(key, _)| *key);
 
             let mut total_matches: u32 = 0;
+            // The other two dimensions of the same work (S1-4). They used to be dropped here
+            // and the weight was computed with `stale_removed = 0` — while the signed
+            // `execute_batch` below passes them — so a batch full of stale removals was
+            // charged for none of them.
+            let mut total_stale_removed: u32 = 0;
+            let mut total_level_scans: u32 = 0;
             for (_, i) in ordered {
                 let signed = &actions[i];
                 let who = <T::Signer as sp_runtime::traits::IdentifyAccount>::into_account(
@@ -1146,17 +1169,16 @@ pub mod pallet {
                     // committed as a whole or not at all, and the next action in the batch
                     // starts from whatever this one committed. The nonce above is outside on
                     // purpose, so a rollback cannot resurrect a consumed signature.
-                    let business: Result<u32, DispatchError> =
+                    let business: Result<MatchStats, DispatchError> =
                         frame_support::storage::with_transaction(|| {
-                            let applied: Result<u32, DispatchError> = (|| {
+                            let applied: Result<MatchStats, DispatchError> = (|| {
                                 match &signed.action {
                                     ExchangeAction::Place(request) => {
-                                        let stats = Self::do_place_order(&who, request.clone())?;
-                                        Ok(stats.matches)
+                                        Self::do_place_order(&who, request.clone())
                                     }
                                     ExchangeAction::Cancel(client_order_id) => {
                                         Self::do_cancel_order(&who, *client_order_id)?;
-                                        Ok(0)
+                                        Ok(MatchStats::default())
                                     }
                                     ExchangeAction::CancelUpTo(client_order_id) => {
                                         let mut account = Self::account_of(&who);
@@ -1172,18 +1194,23 @@ pub mod pallet {
                                             who: who.clone(),
                                             client_order_id: *client_order_id,
                                         });
-                                        Ok(0)
+                                        Ok(MatchStats::default())
                                     }
                                 }
                             })();
                             match applied {
-                                Ok(matches) => TransactionOutcome::Commit(Ok(matches)),
+                                Ok(stats) => TransactionOutcome::Commit(Ok(stats)),
                                 Err(error) => TransactionOutcome::Rollback(Err(error)),
                             }
                         });
 
-                    if let Ok(matches) = business {
-                        total_matches = total_matches.saturating_add(matches);
+                    // Committed only: a rolled-back action must not charge the block for work
+                    // that did not happen.
+                    if let Ok(stats) = business {
+                        total_matches = total_matches.saturating_add(stats.matches);
+                        total_stale_removed =
+                            total_stale_removed.saturating_add(stats.stale_removed);
+                        total_level_scans = total_level_scans.saturating_add(stats.level_scans);
                     }
                     business.map(|_| ())
                 })();
@@ -1199,7 +1226,12 @@ pub mod pallet {
                 }
             }
 
-            let actual = T::WeightInfo::execute_batch(actions.len() as u32, total_matches, 0);
+            let actual = T::WeightInfo::execute_batch(
+                actions.len() as u32,
+                total_matches,
+                total_stale_removed,
+                total_level_scans,
+            );
             Self::consume_block_budget(actual)?;
             Ok(PostDispatchInfo {
                 actual_weight: Some(actual),
