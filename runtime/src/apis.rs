@@ -15,7 +15,8 @@ use pallet_grandpa::AuthorityId as GrandpaId;
 /// A signed exchange action as the node sees it: concrete runtime types, so the API
 /// signature stays free of generics.
 pub use pallet_exchange_core::types::{
-    ActionClass, ExchangeAction, OrderRequest, Side, SortKey, TimeInForce,
+    ActionClass, ActionOutcome, ActionReceipt, ExchangeAction, OrderRequest, Side, SortKey,
+    TimeInForce,
 };
 
 pub type ExchangeSignedAction =
