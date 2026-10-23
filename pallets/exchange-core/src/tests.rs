@@ -2579,6 +2579,105 @@ fn a_matching_batch_reports_more_than_a_resting_one() {
     });
 }
 
+/// A batch action leaves a receipt, whichever way it went (S1-5).
+///
+/// The batch dispatches `Ok` whether or not it executed anything, so a client had no way to
+/// tell "applied" from "refused" except by reading the book and inferring — and no way at all
+/// to tell whether its nonce was spent, which is the difference between retrying and
+/// re-signing.
+#[test]
+fn every_action_leaves_a_receipt() {
+    use crate::types::{ActionOutcome, DEFAULT_SUBACCOUNT as SUB};
+
+    new_test_ext().execute_with(|| {
+        setup_traders();
+        // A resting sell for the applied action to take.
+        assert_ok!(ExchangeCore::place_order(
+            RuntimeOrigin::signed(CHARLIE),
+            gtc(1, Side::Sell, 60_000, 100)
+        ));
+        // No room for another resting order, so BOB's action fills and is then rejected.
+        for id in 1..=16u64 {
+            assert_ok!(ExchangeCore::place_order(
+                RuntimeOrigin::signed(BOB),
+                gtc(id, Side::Buy, 50_000, 1)
+            ));
+        }
+        // Expired: refused before the nonce is touched.
+        let mut expired = signed_action(ALICE, 1, ExchangeAction::CancelUpTo(1));
+        expired.expires_at = System::block_number();
+        sign(&mut expired);
+
+        assert_ok!(ExchangeCore::execute_exchange_batch(
+            RuntimeOrigin::none(),
+            BoundedVec::truncate_from(vec![
+                expired,
+                signed_action(BOB, 1, ExchangeAction::Place(gtc(30, Side::Buy, 60_001, 150))),
+                signed_action(ALICE, 2, ExchangeAction::Place(gtc(31, Side::Buy, 60_001, 10))),
+            ])
+        ));
+
+        let receipts = |who| ExchangeCore::action_receipts(&who, SUB).into_inner();
+
+        // ALICE: refused first (nonce still 1), then applied.
+        let alice = receipts(ALICE);
+        assert_eq!(alice.len(), 2);
+        assert_eq!(alice[0].outcome, ActionOutcome::Refused);
+        assert!(!alice[0].outcome.consumed_nonce());
+        assert!(alice[0].error.is_some(), "a refusal carries the reason");
+        assert_eq!(alice[1].outcome, ActionOutcome::Applied);
+        assert!(alice[1].outcome.consumed_nonce());
+        assert!(alice[1].error.is_none());
+        assert_eq!(alice[1].action_nonce, 2);
+        assert_eq!(alice[1].block as u64, System::block_number());
+
+        // BOB: filled and then rolled back — the nonce is spent even though nothing applied.
+        let bob = receipts(BOB);
+        assert_eq!(bob.len(), 1);
+        assert_eq!(bob[0].outcome, ActionOutcome::Rejected);
+        assert!(bob[0].outcome.consumed_nonce(), "a rejection spends the nonce");
+        assert!(bob[0].error.is_some());
+        assert_eq!(crate::ActionNonce::<Test>::get(BOB, SUB), 1);
+
+        // The refused action left the nonce free, so ALICE's next action still starts at 2.
+        assert_eq!(crate::ActionNonce::<Test>::get(ALICE, SUB), 2);
+    });
+}
+
+/// The receipt ring is bounded per account, so storage cannot be grown by traffic (S1-5).
+#[test]
+fn the_receipt_ring_is_bounded() {
+    use crate::types::DEFAULT_SUBACCOUNT as SUB;
+
+    new_test_ext().execute_with(|| {
+        setup_traders();
+        // One more than the mock's `MaxReceiptsPerAccount` of 4.
+        for nonce in 1..=5u64 {
+            assert_ok!(ExchangeCore::execute_exchange_batch(
+                RuntimeOrigin::none(),
+                BoundedVec::truncate_from(vec![signed_action(
+                    ALICE,
+                    nonce,
+                    ExchangeAction::CancelUpTo(1),
+                )])
+            ));
+        }
+
+        let receipts = ExchangeCore::action_receipts(&ALICE, SUB).into_inner();
+        assert_eq!(receipts.len(), 4, "the ring holds at most its bound");
+        assert_eq!(
+            receipts.last().unwrap().action_nonce,
+            5,
+            "the newest is kept"
+        );
+        assert_eq!(
+            receipts.first().unwrap().action_nonce,
+            2,
+            "the oldest fell off the end"
+        );
+    });
+}
+
 /// A non-zero sub-account is refused (S0-1).
 ///
 /// The nonce is keyed by `(account, subaccount)` while orders, positions and collateral are

@@ -42,6 +42,14 @@ sp_api::decl_runtime_apis! {
         /// than assuming a tick size, because a mismatch is silent and off by orders of
         /// magnitude.
         fn tick_size_quote(market_id: u32) -> Option<u128>;
+        /// What became of this account's batch actions, oldest first (S1-5).
+        ///
+        /// A batch that refuses every action inside still dispatches `Ok`, so this is the only
+        /// way a client can tell "applied" from "refused" — and whether its nonce was spent.
+        fn action_receipts(
+            who: AccountId,
+            subaccount: u32,
+        ) -> alloc::vec::Vec<pallet_exchange_core::types::ActionReceipt>;
     }
 }
 
@@ -654,6 +662,13 @@ impl_runtime_apis! {
 
         fn tick_size_quote(market_id: u32) -> Option<u128> {
             pallet_exchange_core::Pallet::<Runtime>::tick_size_of(market_id)
+        }
+
+        fn action_receipts(
+            who: AccountId,
+            subaccount: u32,
+        ) -> alloc::vec::Vec<pallet_exchange_core::types::ActionReceipt> {
+            pallet_exchange_core::Pallet::<Runtime>::action_receipts(&who, subaccount).into()
         }
     }
 

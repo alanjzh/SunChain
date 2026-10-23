@@ -80,6 +80,8 @@ parameter_types! {
     pub const MaxMarkets: u32 = 3;
     pub const MaxSubaccountsPerAccount: u32 = 16;
     pub const MaxClearingMarkets: u32 = 2;
+    /// Small on purpose: the ring's eviction is part of what is under test (S1-5).
+    pub const MaxReceiptsPerAccount: u32 = 4;
     pub const MaxOpenOrdersPerAccount: u32 = 16;
     pub const MaxPriceLevelsPerSide: u32 = 32;
     pub const MaxOrdersPerLevel: u32 = 16;
@@ -260,6 +262,7 @@ impl pallet_exchange_core::Config for Test {
     type MaxMarkets = MaxMarkets;
     type MaxSubaccountsPerAccount = MaxSubaccountsPerAccount;
     type MaxClearingMarkets = MaxClearingMarkets;
+    type MaxReceiptsPerAccount = MaxReceiptsPerAccount;
     type MaxOpenOrdersPerAccount = MaxOpenOrdersPerAccount;
     type MaxPriceLevelsPerSide = MaxPriceLevelsPerSide;
     type MaxOrdersPerLevel = MaxOrdersPerLevel;

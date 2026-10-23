@@ -528,6 +528,57 @@ pub const SIGNED_ACTION_DOMAIN: &[u8] = b"sunchain:trade-action";
 /// payload formats that both "verify", which is how a stale client keeps signing forever.
 pub const SIGNED_ACTION_VERSION: u16 = 1;
 
+/// What became of one action in a batch (S1-5).
+///
+/// A batch reports `Ok` whether or not it executed anything, so without this the only way to
+/// tell "applied" from "refused" was to read the book and infer. Each variant says whether the
+/// nonce was consumed, which is the part a client cannot work out on its own: a refused action
+/// leaves the nonce free, a rejected one spends it.
+#[derive(
+    Clone, Copy, Debug, Encode, Decode, DecodeWithMemTracking, Eq, PartialEq, TypeInfo, MaxEncodedLen,
+)]
+pub enum ActionOutcome {
+    /// Ran and committed.
+    Applied,
+    /// Refused before anything ran — bad signature, expired, wrong sub-account, nonce not
+    /// ahead. The nonce was **not** consumed.
+    Refused,
+    /// Ran and was rolled back (S1-2): the business part wrote nothing, but the nonce was
+    /// **consumed**, so the same signature cannot be replayed.
+    Rejected,
+}
+
+impl ActionOutcome {
+    /// Whether the action's nonce was spent. True for everything that got as far as the
+    /// nonce check.
+    pub fn consumed_nonce(self) -> bool {
+        !matches!(self, ActionOutcome::Refused)
+    }
+}
+
+/// One action's receipt: what happened, when, and why it did not (S1-5).
+///
+/// Kept per `(account, sub-account)` as a small ring of the most recent outcomes, so a client
+/// can answer "did my order run?" without replaying the chain. Bounded by
+/// `MaxReceiptsPerAccount` — an unbounded receipt log would be a storage growth vector, and
+/// the whole point is to make the *existing* silence observable, not to add a new liability.
+#[derive(
+    Clone, Copy, Debug, Encode, Decode, DecodeWithMemTracking, Eq, PartialEq, TypeInfo, MaxEncodedLen,
+)]
+pub struct ActionReceipt {
+    pub action_nonce: u64,
+    /// Block the batch that carried it was executed in.
+    pub block: u32,
+    pub outcome: ActionOutcome,
+    /// The pallet's error code, when it did not apply: `(pallet index, error code)`. `None`
+    /// for an applied action.
+    ///
+    /// A `DispatchError` is not storable — its `Token` variant carries an unbounded payload —
+    /// so the two numbers that identify the error are kept instead. They decode to the same
+    /// variant through the pallet's metadata.
+    pub error: Option<(u8, [u8; 4])>,
+}
+
 /// One user-signed action in a proposer-built `Exchange Batch` (§12.4).
 ///
 /// `signer` + `signature` are what authorise it — never the account that submitted the

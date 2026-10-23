@@ -49,11 +49,11 @@ pub mod pallet {
     use super::{funding, risk, settlement, types, weights::WeightInfo};
     use crate::types::{
     LiquidityTier,
-        crosses, mul_div_ceil_u128, signed_lots, Account, AccountStatus, ActionClass, CancelReason,
-        ClientOrderId, ExchangeAction, FeeTier, FeeTierId, Lots, Market, MarketConfig, MarketId,
-        MarketStatus, MathError, Order, OrderId, OrderRequest, PartyState, Position, PriceLevel,
-        PriceTicks, QuoteAmount, RiskParams, Side, SIGNED_ACTION_DOMAIN, SIGNED_ACTION_VERSION,
-        SignedExchangeAction, SignedQuote, SortKey, TimeInForce, PPM_DENOM,
+        crosses, mul_div_ceil_u128, signed_lots, Account, AccountStatus, ActionClass, ActionOutcome,
+        ActionReceipt, CancelReason, ClientOrderId, ExchangeAction, FeeTier, FeeTierId, Lots, Market,
+        MarketConfig, MarketId, MarketStatus, MathError, Order, OrderId, OrderRequest, PartyState,
+        Position, PriceLevel, PriceTicks, QuoteAmount, RiskParams, Side, SIGNED_ACTION_DOMAIN,
+        SIGNED_ACTION_VERSION, SignedExchangeAction, SignedQuote, SortKey, TimeInForce, PPM_DENOM,
     };
     use alloc::vec::Vec;
     use codec::{Decode, Encode, MaxEncodedLen};
@@ -138,6 +138,11 @@ pub mod pallet {
         /// Upper bound on markets read by one cross-market risk aggregation (§9.2). Exceeding it
         /// refuses new market positions rather than silently under-aggregating risk.
         type MaxClearingMarkets: Get<u32>;
+        /// How many action receipts to keep per `(account, sub-account)` (S1-5).
+        ///
+        /// The oldest falls off the end, so the storage one account can occupy is bounded by this
+        /// and the total by the number of accounts — never by the number of actions submitted.
+        type MaxReceiptsPerAccount: Get<u32>;
         type MaxOpenOrdersPerAccount: Get<u32>;
         type MaxPriceLevelsPerSide: Get<u32>;
         type MaxOrdersPerLevel: Get<u32>;
@@ -335,6 +340,24 @@ pub mod pallet {
     /// Collected trading fees, still held by the custody account.
     #[pallet::storage]
     pub type FeePool<T> = StorageValue<_, QuoteAmount, ValueQuery>;
+
+    /// What became of this account's batch actions, newest last (S1-5).
+    ///
+    /// A batch that refuses every action inside still dispatches `Ok`, so a client had no way
+    /// to tell "my order ran" from "my order was dropped" except by reading the book. This is
+    /// the answer, kept per `(account, sub-account)` and capped by
+    /// `MaxReceiptsPerAccount` — the oldest falls off the end, so the storage an attacker can
+    /// fill is bounded by the number of accounts, not by the number of actions.
+    #[pallet::storage]
+    pub type ActionReceipts<T> = StorageDoubleMap<
+        _,
+        Blake2_128Concat,
+        <T as frame_system::Config>::AccountId,
+        Blake2_128Concat,
+        SubaccountId,
+        BoundedVec<ActionReceipt, <T as Config>::MaxReceiptsPerAccount>,
+        ValueQuery,
+    >;
 
     /// Losses that could not be collected because the account ran out of collateral.
     ///
@@ -1137,12 +1160,10 @@ pub mod pallet {
                 );
                 let payload = Self::signed_action_payload(signed);
 
-                // Everything up to and including the nonce is *validation*: it writes nothing
-                // but the nonce, and a failure there leaves the account untouched. The
-                // business part below is transactional, because `do_place_order` writes as it
-                // goes — the maker's account and position first, the taker's and the market's
-                // last — and a failure in between used to leave half an order on the book.
-                let outcome = (|| -> DispatchResult {
+                // Validation and business are separated so the receipt can say which of the
+                // two an action failed at — the difference between "your nonce is still free"
+                // and "your nonce is spent" (S1-5).
+                let validated = (|| -> DispatchResult {
                     // Sub-accounts are keyed into the nonce but not into the trading state
                     // machine, so a non-zero value would authorise one key and apply
                     // another. Refuse it here rather than half-apply it (S0-1).
@@ -1160,69 +1181,96 @@ pub mod pallet {
                     ensure!(signed.action_nonce > last, Error::<T>::InvalidActionNonce);
                     // The nonce is consumed whether the business part succeeds or not (S1-2).
                     // A signature that failed must not be replayable — retrying it would
-                    // otherwise be indistinguishable from a new one — and the receipt reports
-                    // `nonce_consumed` separately from the outcome, so the account can see
+                    // otherwise be indistinguishable from a new one — and the receipt says
                     // which of the two happened.
                     ActionNonce::<T>::insert(&who, signed.subaccount, signed.action_nonce);
-
-                    // The business part, one transaction per action: what it writes is
-                    // committed as a whole or not at all, and the next action in the batch
-                    // starts from whatever this one committed. The nonce above is outside on
-                    // purpose, so a rollback cannot resurrect a consumed signature.
-                    let business: Result<MatchStats, DispatchError> =
-                        frame_support::storage::with_transaction(|| {
-                            let applied: Result<MatchStats, DispatchError> = (|| {
-                                match &signed.action {
-                                    ExchangeAction::Place(request) => {
-                                        Self::do_place_order(&who, request.clone())
-                                    }
-                                    ExchangeAction::Cancel(client_order_id) => {
-                                        Self::do_cancel_order(&who, *client_order_id)?;
-                                        Ok(MatchStats::default())
-                                    }
-                                    ExchangeAction::CancelUpTo(client_order_id) => {
-                                        let mut account = Self::account_of(&who);
-                                        if *client_order_id > account.invalid_before {
-                                            account.invalid_before = *client_order_id;
-                                            Accounts::<T>::insert(
-                                                &who,
-                                                signed.subaccount,
-                                                account,
-                                            );
-                                        }
-                                        Self::deposit_event(Event::OrdersInvalidatedUpTo {
-                                            who: who.clone(),
-                                            client_order_id: *client_order_id,
-                                        });
-                                        Ok(MatchStats::default())
-                                    }
-                                }
-                            })();
-                            match applied {
-                                Ok(stats) => TransactionOutcome::Commit(Ok(stats)),
-                                Err(error) => TransactionOutcome::Rollback(Err(error)),
-                            }
-                        });
-
-                    // Committed only: a rolled-back action must not charge the block for work
-                    // that did not happen.
-                    if let Ok(stats) = business {
-                        total_matches = total_matches.saturating_add(stats.matches);
-                        total_stale_removed =
-                            total_stale_removed.saturating_add(stats.stale_removed);
-                        total_level_scans = total_level_scans.saturating_add(stats.level_scans);
-                    }
-                    business.map(|_| ())
+                    Ok(())
                 })();
 
-                if let Err(error) = outcome {
-                    // Skip, do not abort: a batch holds many users' actions.
-                    Self::deposit_event(Event::ExchangeActionFailed {
-                        who,
-                        subaccount: signed.subaccount,
-                        action_nonce: signed.action_nonce,
-                        error,
-                    });
+                // The business part, one transaction per action: what it writes is committed
+                // as a whole or not at all, and the next action in the batch starts from
+                // whatever this one committed. The nonce write above is outside on purpose, so
+                // a rollback cannot resurrect a consumed signature.
+                let (result, nonce_consumed): (Result<MatchStats, DispatchError>, bool) =
+                    match validated {
+                        // Refused before the nonce: nothing ran, and nothing was consumed.
+                        Err(error) => (Err(error), false),
+                        Ok(()) => {
+                            let business: Result<MatchStats, DispatchError> =
+                                frame_support::storage::with_transaction(|| {
+                                    let applied: Result<MatchStats, DispatchError> = (|| {
+                                        match &signed.action {
+                                            ExchangeAction::Place(request) => {
+                                                Self::do_place_order(&who, request.clone())
+                                            }
+                                            ExchangeAction::Cancel(client_order_id) => {
+                                                Self::do_cancel_order(&who, *client_order_id)?;
+                                                Ok(MatchStats::default())
+                                            }
+                                            ExchangeAction::CancelUpTo(client_order_id) => {
+                                                let mut account = Self::account_of(&who);
+                                                if *client_order_id > account.invalid_before {
+                                                    account.invalid_before = *client_order_id;
+                                                    Accounts::<T>::insert(
+                                                        &who,
+                                                        signed.subaccount,
+                                                        account,
+                                                    );
+                                                }
+                                                Self::deposit_event(Event::OrdersInvalidatedUpTo {
+                                                    who: who.clone(),
+                                                    client_order_id: *client_order_id,
+                                                });
+                                                Ok(MatchStats::default())
+                                            }
+                                        }
+                                    })();
+                                    match applied {
+                                        Ok(stats) => TransactionOutcome::Commit(Ok(stats)),
+                                        Err(error) => TransactionOutcome::Rollback(Err(error)),
+                                    }
+                                });
+                            (business, true)
+                        },
+                    };
+
+                // Committed only: a rolled-back action must not charge the block for work
+                // that did not happen (S1-4).
+                if let Ok(stats) = &result {
+                    total_matches = total_matches.saturating_add(stats.matches);
+                    total_stale_removed = total_stale_removed.saturating_add(stats.stale_removed);
+                    total_level_scans = total_level_scans.saturating_add(stats.level_scans);
+                }
+
+                match result {
+                    Ok(_) => Self::record_action_receipt(
+                        &who,
+                        signed.subaccount,
+                        signed.action_nonce,
+                        ActionOutcome::Applied,
+                        None,
+                    ),
+                    Err(error) => {
+                        let outcome = if nonce_consumed {
+                            ActionOutcome::Rejected
+                        } else {
+                            ActionOutcome::Refused
+                        };
+                        Self::record_action_receipt(
+                            &who,
+                            signed.subaccount,
+                            signed.action_nonce,
+                            outcome,
+                            Some(error.clone()),
+                        );
+                        // Skip, do not abort: a batch holds many users' actions.
+                        Self::deposit_event(Event::ExchangeActionFailed {
+                            who,
+                            subaccount: signed.subaccount,
+                            action_nonce: signed.action_nonce,
+                            error,
+                        });
+                    },
                 }
             }
 
@@ -2987,6 +3035,48 @@ pub mod pallet {
             &action.action,
         )
             .encode()
+    }
+
+    /// Records what became of one action (S1-5).
+    ///
+    /// Written *outside* the business transaction: a rolled-back action is exactly the one
+    /// whose receipt matters, and it would be rolled back with the rest. The ring is capped,
+    /// so the write is bounded and cannot be grown by flooding the batch with actions.
+    fn record_action_receipt(
+        who: &T::AccountId,
+        subaccount: SubaccountId,
+        action_nonce: u64,
+        outcome: ActionOutcome,
+        error: Option<DispatchError>,
+    ) {
+        let error = error.and_then(|error| match error {
+            DispatchError::Module(module) => Some((module.index, module.error)),
+            // A non-module error (arithmetic, bad origin) is not this pallet's to name; it is
+            // still recorded as "did not apply", just without a code.
+            _ => None,
+        });
+        let receipt = ActionReceipt {
+            action_nonce,
+            block: frame_system::Pallet::<T>::block_number().saturated_into(),
+            outcome,
+            error,
+        };
+        ActionReceipts::<T>::mutate(who, subaccount, |receipts| {
+            // Drop the oldest to make room; the newest is what a client is asking about.
+            while receipts.len() as u32 >= T::MaxReceiptsPerAccount::get() {
+                receipts.remove(0);
+            }
+            // Cannot overflow: the bound is a `Get<u32>` and the vec is capped at it.
+            let _ = receipts.try_push(receipt);
+        });
+    }
+
+    /// The most recent outcomes for an account, oldest first (S1-5).
+    pub fn action_receipts(
+        who: &T::AccountId,
+        subaccount: SubaccountId,
+    ) -> BoundedVec<ActionReceipt, <T as Config>::MaxReceiptsPerAccount> {
+        ActionReceipts::<T>::get(who, subaccount)
     }
 
     /// A signature is valid only inside its own window (S1-1).

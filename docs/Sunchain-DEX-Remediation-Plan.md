@@ -139,8 +139,25 @@
     市场数增长）、`a_matching_batch_reports_more_than_a_resting_one`（成交 batch、以及
     **只做 stale 移除**的 batch，报告的 weight 都高于只挂单的 batch）。反向验证：把
     `stale_removed`/`level_scans` 重新丢掉（旧行为）后，stale 断言立即失败。
-- **S1-5 最小可用 receipt（P1-5 第一步）**
-  新增**有界** `ActionReceipts`：`(signer, subaccount) -> BoundedVec<(nonce, status, error_code, block)>`，`on_initialize` 按 TTL 清理；receipt 带 `nonce_consumed` 字段。
+- **S1-5 最小可用 receipt（P1-5 第一步）** ✅ 已完成（2026-10-23）
+  - `types.rs` 新增 `ActionOutcome`（`Applied` / `Refused` / `Rejected`，`consumed_nonce()`
+    区分"nonce 还空着"与"nonce 已花"）与 `ActionReceipt{action_nonce, block, outcome,
+  error: Option<(u8,[u8;4])>}`（`DispatchError` 不可存，`Token` 变体带无界 payload，因此只存
+  module index + error code）。
+  - 新增 storage `ActionReceipts: (AccountId, SubaccountId) -> BoundedVec<ActionReceipt,
+    MaxReceiptsPerAccount>`（ring，超出淘汰最老）；新 Config 常量 `MaxReceiptsPerAccount`
+    （mock 4、runtime 32）。
+  - `execute_exchange_batch` 的循环拆成 validation / business 两段：refusal（签名/过期/
+    subaccount/nonce）→ `Refused` 且 nonce 未消费；业务回滚 → `Rejected` 且 nonce 已消费；
+    成功 → `Applied`。receipt 写在事务**外**（否则最需要记录的那条会被回滚掉）。
+  - `Pallet::action_receipts(who, subaccount)` + Runtime API `ExchangeRuntimeApi::
+    action_receipts`，供 S2-5 的 RPC 直接调用。
+  - 新测试：`every_action_leaves_a_receipt`（同一 batch 内三种 outcome 各一条，含 block 号、
+    错误码、nonce 状态）、`the_receipt_ring_is_bounded`（超出淘汰最老、保留最新）。反向
+    验证：删掉 rejected 分支的 receipt 写入后，前者立即失败。
+  - 偏差记录：计划原写"`on_initialize` 按 TTL 清理"，实际改为**按条数上界**——
+    `on_initialize` 无法遍历所有账户（违反 §16.2 的有界迭代），而条数上界同时给出存储上界
+    与可预测的驱逐行为。RPC 查询/订阅/告警属 S2-5。
 
 **验收**：`cargo test -p pallet-exchange-core` 全过 + 新增 20+ 用例；`cargo test -p sunchain-runtime --features try-runtime --test migration` 过；dev 链 `--fresh` 重启后 `dex-cli` 下单/撤单成功且 receipt 可查。
 
@@ -219,7 +236,7 @@
 - [x] S0：非零 subaccount 被拒绝；all-features / try-runtime 构建通过；release 产物路径正确
 - [x] S1：签名绑定 version / chain / domain / expiry，并有 golden vector
 - [x] S1：每条 batch action 具备原子回滚、明确 nonce 语义（业务失败也消费）与 receipt
-  （回滚与 nonce 语义已落地；receipt 属 S1-5）
+  （receipt 已落地：storage + Runtime API；RPC 查询与告警属 S2-5）
 - [x] S1：排序规则可由 Runtime 验证，文档不再承诺本地 arrival 公平
 - [x] S1：batch 实际 weight 与治理遍历 weight 与 benchmark 同维度
   （维度与 benchmark 已就位；`weights.rs` 数字仍待 `frame-benchmarking-cli` 重跑）

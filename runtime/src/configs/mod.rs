@@ -383,6 +383,10 @@ impl pallet_exchange_core::Config for Runtime {
 	type MaxMarkets = ConstU32<64>;
 	type MaxSubaccountsPerAccount = ConstU32<16>;
 	type MaxClearingMarkets = ConstU32<8>;
+	/// Action receipts per (account, sub-account) (S1-5). 32 entries is ~2 KiB per account,
+	/// which is the price of a client being able to ask "did my order run?" without replaying
+	/// the chain.
+	type MaxReceiptsPerAccount = ConstU32<32>;
 	type MaxOpenOrdersPerAccount = ConstU32<64>;
 	type MaxPriceLevelsPerSide = ConstU32<1_024>;
 	type MaxOrdersPerLevel = ConstU32<256>;
