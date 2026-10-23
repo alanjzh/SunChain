@@ -196,11 +196,11 @@
 
 | # | 任务 | 位置 |
 | --- | --- | --- |
-| S2-1 | 限流窗口改**单调时钟或区块高度**（不再由收到消息数推进）；参数改为真正生效的配额；key 扩为 `(peer, signer)` 双维 + 全局字节预算 | `node/src/exchange_p2p.rs:102-108`、`:135` |
-| S2-2 | 解码前做**显式大小检查**；seen 改语义 key `(signer, subaccount, nonce)` 且在**解码后**插入；垃圾包走独立 per-peer 计数，不占用 action seen set | `exchange_p2p.rs:178-197` |
+| S2-1 | ✅ 限流窗口改**块高**推进（不再由收到消息数推进——那正是可被绕过的原因）；参数改为真正生效的配额；key 扩为 `(peer, account)` 双维 + per-peer 字节预算 + 坏包预算 | `node/src/exchange_p2p.rs` |
+| S2-2 | ✅ 一半已完成（随 S2-1 落地）：解码前**显式大小检查**（`MAX_NOTIFICATION_BYTES`）、seen 只在包**成功解码为 action 后**才插入（垃圾包不再挤占真实 action 的 id）、解码失败的包只计入 peer 坏包预算。**剩余**：seen 的 key 从"整个 payload 字节"改为语义 `(signer, subaccount, nonce)` | `exchange_p2p.rs` |
 | S2-3 | 显式 batch builder：按 canonical 顺序逐条尝试，逐项检查 action 数 / SCALE 字节 / `action_weight` API / 市场配额 / block 剩余预算 | `node/src/exchange_proposer.rs:91-151` |
 | S2-4 | 未纳入原因的日志与 Prometheus 指标（当前 0 个 exchange 专用指标） | `exchange_proposer.rs`、`service.rs` |
-| S2-5 | RPC `exchange_actionStatus(signer, subaccount, nonce)`：未入池 / 已入块 / 已拒绝 / 已回退 | `node/src/rpc/exchange.rs` |
+| S2-5 | RPC `exchange_actionStatus(signer, subaccount, nonce)`：未入池 / 已入块 / 已拒绝 / 已回退。**Runtime API 已就绪**（S1-5 的 `ExchangeRuntimeApi::action_receipts`），node 侧只需包一层 | `node/src/rpc/exchange.rs` |
 | S2-6 | pool 持久化或重传（现在是纯内存 `BTreeMap`，重启全丢；prune 任务只删不重播） | `node/src/exchange_pool.rs:33`、`service.rs:698-743` |
 
 **验收**：泛洪 / 畸形 SCALE / 重复 / 无效签名压力脚本下节点不出错；两名真实账户完成 maker-taker、撤单、reduce-only、funding、清算、ADL 端到端；节点重启后未执行 action 可恢复。
