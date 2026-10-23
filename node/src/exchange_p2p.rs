@@ -63,10 +63,16 @@ pub fn exchange_peers_set_config<B: BlockT, N: NetworkBackend<B, <B as BlockT>::
 	)
 }
 
-/// Bounded set of already-seen payload ids, evicting the oldest when full.
+/// One action is identified by who sent it and which slot they are filling — not by its bytes.
+/// Two different payloads for the same `(signer, subaccount, nonce)` are the same action (a
+/// re-sign), and a re-sign must not be relayed twice; conversely an action re-relayed by the
+/// network arrives with identical bytes and need not be decoded to recognise it.
+pub type SeenKey = (Vec<u8>, u32, u64);
+
+/// Bounded set of already-seen action ids, evicting the oldest when full.
 pub struct Seen {
-	set: HashSet<Vec<u8>>,
-	order: VecDeque<Vec<u8>>,
+	set: HashSet<SeenKey>,
+	order: VecDeque<SeenKey>,
 	cap: usize,
 }
 
@@ -76,7 +82,7 @@ impl Seen {
 	}
 
 	/// Returns `true` if this id was **not** seen before.
-	pub fn insert(&mut self, id: Vec<u8>) -> bool {
+	pub fn insert(&mut self, id: SeenKey) -> bool {
 		if !self.set.insert(id.clone()) {
 			return false
 		}
@@ -233,9 +239,21 @@ pub async fn run_exchange_gossip<B, C>(
 		};
 
 		match which {
-			// A locally submitted action: put it on the wire.
+			// A locally submitted action: put it on the wire. Deduped by the same semantic key
+			// as received actions, so a local submit that was also relayed back to us is not
+			// bounced around a second time.
 			Which::Local(Some(bytes)) => {
-				if seen.insert(bytes.clone()) {
+				let relay_once = match scale_codec::Decode::decode(&mut &bytes[..])
+					as Result<sunchain_runtime::apis::ExchangeSignedAction, _>
+				{
+					Ok(action) => seen.insert((
+						action.signer.0.to_vec(),
+						action.subaccount,
+						action.action_nonce,
+					)),
+					Err(_) => true, // malformed local submission: relay once, peers drop it
+				};
+				if relay_once {
 					relay(&mut service, &peers, &bytes).await;
 				}
 				continue
@@ -269,16 +287,19 @@ pub async fn run_exchange_gossip<B, C>(
 						continue
 					}
 
-					let Some(action) = scale_codec::Decode::decode(&mut &notification[..]).ok() else {
+					let Some(action): Option<sunchain_runtime::apis::ExchangeSignedAction> =
+						scale_codec::Decode::decode(&mut &notification[..]).ok()
+					else {
 						// Not an action, so it must not occupy a dedup slot — but the peer is
 						// charged a malformed packet for it.
 						limits.charge(&peer, 0, true);
 						continue
 					};
 
-					// Dedup on the payload itself: identical bytes are the same action. Only
+					// Dedup on the action itself, not its bytes: the same (signer, subaccount,
+					// nonce) re-signed is the same action and must not be relayed twice. Only
 					// reached by packets that decoded, so junk cannot fill the set.
-					if !seen.insert(notification.clone()) {
+					if !seen.insert((action.signer.0.to_vec(), action.subaccount, action.action_nonce)) {
 						continue
 					}
 
@@ -353,18 +374,35 @@ mod tests {
 	#[test]
 	fn seen_rejects_a_repeat() {
 		let mut s = Seen::new(4);
-		assert!(s.insert(b"a".to_vec()));
-		assert!(!s.insert(b"a".to_vec()), "a repeat must not pass as new");
-		assert!(s.insert(b"b".to_vec()));
+		assert!(s.insert((b"acct".to_vec(), 0u32, 1u64)));
+		// Same action re-signed with different bytes is still the same action.
+		assert!(!s.insert((b"acct".to_vec(), 0u32, 1u64)), "a repeat must not pass as new");
+		assert!(s.insert((b"acct".to_vec(), 0u32, 2u64)));
+		// A different signer with the same numbers is a different action.
+		assert!(s.insert((b"other".to_vec(), 0u32, 1u64)));
 	}
 
 	#[test]
 	fn seen_stays_bounded() {
 		let mut s = Seen::new(2);
-		for k in [b"1", b"2", b"3", b"4"] {
-			s.insert(k.to_vec());
+		for n in 1..=4u64 {
+			s.insert((b"acct".to_vec(), 0u32, n));
 		}
 		assert_eq!(s.set.len(), 2, "the oldest ids are evicted, not accumulated");
+	}
+
+	/// The dedup key is the action, not its bytes (S2-2).
+	///
+	/// A client that re-signs the same (signer, subaccount, nonce) with a different payload
+	/// produces different bytes but must still be recognised as a repeat. Byte-keyed dedup
+	/// would have relayed it a second time.
+	#[test]
+	fn a_re_sign_is_a_repeat_even_if_the_bytes_differ() {
+		let mut s = Seen::new(8);
+		assert!(s.insert((b"acct".to_vec(), 0u32, 1u64)));
+		assert!(!s.insert((b"acct".to_vec(), 0u32, 1u64)));
+		assert!(s.insert((b"acct".to_vec(), 7u32, 1u64)), "a different sub-account is new");
+		assert!(s.insert((b"acct".to_vec(), 0u32, 9u64)), "a different nonce is new");
 	}
 
 	#[test]

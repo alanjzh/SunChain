@@ -197,7 +197,7 @@
 | # | 任务 | 位置 |
 | --- | --- | --- |
 | S2-1 | ✅ 限流窗口改**块高**推进（不再由收到消息数推进——那正是可被绕过的原因）；参数改为真正生效的配额；key 扩为 `(peer, account)` 双维 + per-peer 字节预算 + 坏包预算 | `node/src/exchange_p2p.rs` |
-| S2-2 | ✅ 一半已完成（随 S2-1 落地）：解码前**显式大小检查**（`MAX_NOTIFICATION_BYTES`）、seen 只在包**成功解码为 action 后**才插入（垃圾包不再挤占真实 action 的 id）、解码失败的包只计入 peer 坏包预算。**剩余**：seen 的 key 从"整个 payload 字节"改为语义 `(signer, subaccount, nonce)` | `exchange_p2p.rs` |
+| S2-2 | ✅ 已完成（2026-10-23）：随 S2-1 落地的解码前大小检查 + seen 仅在解码成功后占用；本次把 seen 的 key 从"整个 payload 字节"改为**语义** `(signer, subaccount, nonce)`——同一 action 被重签（字节不同）仍被识别为重复，不会被二次中继；本地提交路径也用同一语义键去重 | `node/src/exchange_p2p.rs` |
 | S2-3 | 显式 batch builder：按 canonical 顺序逐条尝试，逐项检查 action 数 / SCALE 字节 / `action_weight` API / 市场配额 / block 剩余预算 | `node/src/exchange_proposer.rs:91-151` |
 | S2-4 | 未纳入原因的日志与 Prometheus 指标（当前 0 个 exchange 专用指标） | `exchange_proposer.rs`、`service.rs` |
 | S2-5 | RPC `exchange_actionStatus(signer, subaccount, nonce)`：未入池 / 已入块 / 已拒绝 / 已回退。**Runtime API 已就绪**（S1-5 的 `ExchangeRuntimeApi::action_receipts`），node 侧只需包一层 | `node/src/rpc/exchange.rs` |
