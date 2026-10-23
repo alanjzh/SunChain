@@ -53,13 +53,17 @@ jobs:
           rustup target add wasm32-unknown-unknown
           rustup component add rust-src
 
-      - name: Build the template
-        run: cargo build --locked --release
+      # `-p sunchain`, not the whole workspace: `--features` in a virtual workspace applies
+      # to every default member, and only the node forwards `on-chain-release-build`.
+      - name: Build the node
+        run: cargo build --locked --release -p sunchain --features on-chain-release-build
         timeout-minutes: 90
 
+      # These used to name the solochain template, which this repository is not: the upload
+      # step then failed on a path that never existed.
       - name: Upload the binaries
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            target/release/solochain-template-node
-            target/release/wbuild/solochain-template-runtime/solochain_template_runtime.compact.compressed.wasm
+            target/release/sunchain
+            target/release/wbuild/sunchain-runtime/sunchain_runtime.compact.compressed.wasm

@@ -2315,6 +2315,47 @@ fn a_signed_action_cannot_be_replayed() {
     });
 }
 
+/// A non-zero sub-account is refused (S0-1).
+///
+/// The nonce is keyed by `(account, subaccount)` while orders, positions and collateral are
+/// not, so a non-zero value would be authorised against one key and applied to another —
+/// `CancelUpTo` used to read the default account and write the signed one. Until S3-1
+/// threads `subaccount` through the whole state machine, refusing is the honest answer.
+#[test]
+fn a_non_zero_subaccount_is_refused() {
+    new_test_ext().execute_with(|| {
+        setup_traders();
+        let signed = |subaccount, action| crate::types::SignedExchangeAction {
+            signer: TestSigner(ALICE),
+            subaccount,
+            action_nonce: 1,
+            action,
+            // The test double accepts exactly this relation.
+            signature: TestSignature(ALICE),
+        };
+
+        // The pool must refuse it too, or it would queue an action the chain then drops.
+        assert_eq!(
+            ExchangeCore::validate_signed_action(&signed(7, ExchangeAction::CancelUpTo(5))),
+            Err(Error::<Test>::SubaccountUnsupported.into())
+        );
+
+        assert_ok!(ExchangeCore::execute_exchange_batch(
+            RuntimeOrigin::none(),
+            BoundedVec::truncate_from(vec![
+                signed(7, ExchangeAction::Place(gtc(9, Side::Buy, 60_000, 1))),
+                signed(7, ExchangeAction::CancelUpTo(5)),
+            ])
+        ));
+
+        // Nothing landed: no nonce consumed, and no account written under sub-account 7 —
+        // which is exactly the key the old `CancelUpTo` wrote to.
+        assert_eq!(crate::ActionNonce::<Test>::get(ALICE, 7), 0);
+        assert!(Accounts::<Test>::get(ALICE, 7).is_none());
+        assert!(crate::UserOrderByClientId::<Test>::get((ALICE, DEFAULT_SUBACCOUNT, 9)).is_none());
+    });
+}
+
 /// Within a class, arrival order decides who is filled — not the submitter's whim.
 #[test]
 fn arrival_index_breaks_ties_so_the_submitter_cannot_reorder() {

@@ -63,8 +63,13 @@ runtime-benchmarks = [
 	"frame-system/runtime-benchmarks",
 	"sp-runtime/runtime-benchmarks",
 ]
+# `pallet-assets` is a dev-dependency and pulls in `pallet-revive`. When this crate alone is
+# built with `try-runtime`, Cargo unifies `sp-runtime` into its try-runtime form while revive
+# keeps the non-try-runtime one, and revive's `Checkable` impl then loses a required method
+# (E0046). Propagating the feature keeps both sides in the same configuration.
 try-runtime = [
 	"frame-support/try-runtime",
 	"frame-system/try-runtime",
+	"pallet-assets/try-runtime",
 	"sp-runtime/try-runtime",
 ]

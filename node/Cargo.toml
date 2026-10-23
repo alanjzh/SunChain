@@ -203,6 +203,8 @@ try-runtime = [
 	"sunchain-runtime/try-runtime",
 	"sp-runtime/try-runtime",
 ]
+# Metadata hash and logging off, for release builds (runtime/Cargo.toml has the real switch).
+on-chain-release-build = ["sunchain-runtime/on-chain-release-build"]
 
 sql = [
 	"fc-db/sql",

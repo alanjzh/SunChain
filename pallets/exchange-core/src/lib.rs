@@ -633,6 +633,16 @@ pub mod pallet {
         InvalidActionSignature,
         /// `action_nonce` must be greater than the last one consumed (never reused).
         InvalidActionNonce,
+        /// Sub-accounts are not supported yet.
+        ///
+        /// The nonce is keyed by `(account, subaccount)`, but orders, positions and
+        /// collateral are not: every trading path reads and writes `DEFAULT_SUBACCOUNT`
+        /// (`do_place_order`, `do_cancel_order`, `account_of`, `position_of`). A non-zero
+        /// sub-account would therefore be authorised against one key and applied to
+        /// another — `CancelUpTo` even reads the default account and writes the signed
+        /// one. Refusing is the only honest answer until the whole state machine carries
+        /// `subaccount` (see `docs/Sunchain-DEX-Remediation-Plan.md`, S0-1 / S3-1).
+        SubaccountUnsupported,
     }
 
 
@@ -1078,6 +1088,13 @@ pub mod pallet {
                 let payload = (signed.subaccount, signed.action_nonce, &signed.action).encode();
 
                 let outcome = (|| -> DispatchResult {
+                    // Sub-accounts are keyed into the nonce but not into the trading state
+                    // machine, so a non-zero value would authorise one key and apply
+                    // another. Refuse it here rather than half-apply it (S0-1).
+                    ensure!(
+                        signed.subaccount == DEFAULT_SUBACCOUNT,
+                        Error::<T>::SubaccountUnsupported
+                    );
                     ensure!(
                         sp_runtime::traits::Verify::verify(&signed.signature, &payload[..], &who,),
                         Error::<T>::InvalidActionSignature
@@ -2857,6 +2874,11 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = <T::Signer as sp_runtime::traits::IdentifyAccount>::into_account(
                 action.signer.clone(),
+            );
+            // The pool must not accept what the dispatchable will refuse (S0-1).
+            ensure!(
+                action.subaccount == DEFAULT_SUBACCOUNT,
+                Error::<T>::SubaccountUnsupported
             );
             let payload = (action.subaccount, action.action_nonce, &action.action).encode();
             ensure!(

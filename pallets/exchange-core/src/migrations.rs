@@ -12,12 +12,13 @@ use exchange_primitives::DEFAULT_SUBACCOUNT;
 use frame_support::storage::unhashed;
 use frame_support::{traits::Get, weights::Weight};
 
+// `Vec` comes from `alloc::vec::Vec` above; `sp_std::vec` is the same item, and importing
+// it a second time under `try-runtime` is E0252 — which is why `--all-features` used to
+// fail while the default build stayed green.
 #[cfg(feature = "try-runtime")]
 use codec::Encode;
 #[cfg(feature = "try-runtime")]
 use frame_support::storage::IterableStorageDoubleMap;
-#[cfg(feature = "try-runtime")]
-use sp_std::vec::Vec;
 
 /// `Position` exactly as Phase 1 encoded it: no `funding_index`.
 ///

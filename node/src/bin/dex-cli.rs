@@ -23,6 +23,11 @@
 //! differently and hides the cause. The checks below exist because each of those was mistaken
 //! for success exactly once.
 //!
+//! `subaccount` is pinned to 0 on purpose. The nonce is keyed by `(account, subaccount)` but
+//! orders, positions and collateral are not, so a non-zero value is refused with
+//! `SubaccountUnsupported` rather than applied to the default account by accident. See
+//! `docs/Sunchain-DEX-Remediation-Plan.md` (S0-1 now, S3-1 for the real fix).
+//!
 //! ```text
 //! cargo run --bin dex-cli -- --key 0x<64 hex> deposit --amount 1000000000
 //! cargo run --bin dex-cli -- feed --market 0 --price 60000 --every 45
