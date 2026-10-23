@@ -65,8 +65,9 @@ pub type HostFunctions = (
     cumulus_primitives_proof_size_hostfunction::storage_proof_size::HostFunctions,
 );
 /// Upper bound on actions packed into one exchange batch; must not exceed the runtime's
-/// `MaxActionsPerBatch`, which the extrinsic re-checks anyway.
-const MAX_EXCHANGE_BATCH_ACTIONS: usize = 8;
+/// `MaxActionsPerBatch`, which the extrinsic re-checks anyway. Defined in the proposer, which
+/// is the only other user.
+pub(crate) use crate::exchange_proposer::MAX_EXCHANGE_BATCH_ACTIONS;
 
 pub(crate) type FullClient = sc_service::TFullClient<
     Block,
