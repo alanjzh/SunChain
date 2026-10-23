@@ -222,14 +222,39 @@
 
 ---
 
-## 6. 执行提醒
+## 6. E2E 验证记录（2026-10-23，`--fresh` 双验证人链 + 代理）
+
+按 §7 之前先跑通了全链路，结论：S1 的五项在真实链上均生效，并**抓到一个 S1-4 的遗留缺陷**。
+
+**抓到的缺陷（已修）**：S1-4 给 `execute_exchange_batch` 补上 level-scan 维度后，声明的
+worst-case weight 变成 ~1.7e12 ps，超过 Normal class 的单块预算（~1.5e12），于是每个 batch
+extrinsic 在 validate 阶段就被拒（`InvalidTransaction::ExhaustsResources`）——订单没问题，
+是这个 batch 根本付不起。修法：`MaxActionsPerBatch` 16 → 8（8 也是 node 池
+`MAX_EXCHANGE_BATCH_ACTIONS` 的既有上限，16 本就不可达）。
+
+**验证结果**
+
+| 项目 | 证据 |
+| --- | --- |
+| 喂价整改（前序提交） | 节点日志 `round N: 18 quote(s) fetched`（4 market × 4 venue + 2 peg），价格 2 个 source、age 0 块 |
+| S1-1 签名域 | `dex-cli buy` 的 `validate -> ok`（新 payload 由 pallet 函数构造，客户端一致） |
+| S1-2 事务边界 | `--price 0` 的 action：业务拒绝、无订单残留、**nonce 仍被消费** |
+| S1-3 canonical 排序 | pool 取出的 batch 通过 `validate_unsigned` 的严格升序校验并入块（顺序校验不认就会整批拒绝） |
+| S1-4 weight 维度 | 修复 `MaxActionsPerBatch` 后 batch 可入块；修复前 dry-run 即 `ExhaustsResources` |
+| S1-5 receipt | `ExchangeRuntimeApi_action_receipts` 返回三条：nonce 1/2 = `Applied`（block 36/37），nonce 3 = `Rejected`（block 69，`nonce_consumed=true`，error = pallet#22 code 6 = `InvalidPrice`） |
+| 端到端 | `dex_flow.py`：deposit → resting buy → crossing sell → match → position → fees(97181) 全通 |
+
+**复现方式**：`source scripts/proxy_env.sh && scripts/start_chain.sh --fresh`（skill 目录下），
+`dex_flow.py`，receipt 用 `state_call ExchangeRuntimeApi_action_receipts`。
+
+## 7. 执行提醒
 
 - S1 及之后凡改动 runtime，**dev 链必须 `--fresh` 清库重启**：否则 DB 中的旧 WASM 与节点原生 runtime 不一致，表现为喂价投票被 `BadProof` 拒绝、价格永久陈旧。
 - S1-1 改变签名 payload 会同时影响 `dex-cli`；改完需重跑 deposit → place → cancel 全链路，确认没有遗漏第二处签名构造。
 
 ---
 
-## 7. 验收清单
+## 8. 验收清单
 
 在进入真实资产或 Native TradeDomain 抽取前，以下项目必须全部关闭：
 

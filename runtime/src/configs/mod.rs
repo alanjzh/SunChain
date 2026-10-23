@@ -391,7 +391,13 @@ impl pallet_exchange_core::Config for Runtime {
 	type MaxPriceLevelsPerSide = ConstU32<1_024>;
 	type MaxOrdersPerLevel = ConstU32<256>;
 	type MaxMatchesPerAction = ConstU32<64>;
-	type MaxActionsPerBatch = ConstU32<16>;
+	/// 8, not 16: a batch's declared weight is the worst case over every dimension — actions,
+	/// matches, stale removals *and* price-level scans (S1-4) — and that worst case has to fit
+	/// inside one Normal-class block. At 16 it came to ~1.7e12 ps against a ~1.5e12 budget,
+	/// which made every batch extrinsic fail validation with `ExhaustsResources`: nothing was
+	/// wrong with the orders, the batch simply could not be paid for. 8 is also what the node's
+	/// pool already allows (`MAX_EXCHANGE_BATCH_ACTIONS`), so 16 was unreachable anyway.
+	type MaxActionsPerBatch = ConstU32<8>;
 	type MaxPrunePerCall = ConstU32<64>;
 	/// 28,800 blocks; with the current 3s block time this is ~24h.
 	type MaxOrderLifetime = ConstU32<28_800>;
