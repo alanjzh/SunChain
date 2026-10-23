@@ -2,7 +2,8 @@
 
 use crate::{
     mock::*, types::*, Accounts, BlockExchangeUsage, Error, Event, FeePool, Markets, Orders,
-    Positions, PriceLevels, PremiumVotes, UserOrderByClientId,
+    Positions, PriceLevels, PremiumVotes, UserOrderByClientId, SIGNED_ACTION_DOMAIN,
+    SIGNED_ACTION_VERSION,
 };
 use exchange_primitives::DEFAULT_SUBACCOUNT;
 use frame_support::{
@@ -2186,14 +2187,28 @@ fn signed_action(
     nonce: u64,
     action: ExchangeAction<u64>,
 ) -> crate::types::SignedExchangeAction<TestSigner, TestSignature, u64> {
-    crate::types::SignedExchangeAction {
+    let mut signed = crate::types::SignedExchangeAction {
         signer: TestSigner(account),
         subaccount: DEFAULT_SUBACCOUNT,
         action_nonce: nonce,
+        // 100 blocks out: past the block this test runs at, nowhere near `MaxOrderLifetime`
+        // (28 800). See `a_signature_expires`.
+        expires_at: System::block_number() + 100,
         action,
-        // The test double accepts exactly this relation.
-        signature: TestSignature(account),
-    }
+        signature: TestSignature(account, sp_core::ecdsa::Signature::default()),
+    };
+    sign(&mut signed);
+    signed
+}
+
+/// Signs `action` exactly as its signer would: over the payload the runtime re-derives.
+///
+/// The signature is real (see `crate::mock::keyring`), so anything the payload binds — the
+/// domain, the version, the chain, the expiry — is genuinely part of what verifies.
+fn sign(action: &mut crate::types::SignedExchangeAction<TestSigner, TestSignature, u64>) {
+    let account = action.signer.0;
+    let payload = ExchangeCore::signed_action_payload(action);
+    action.signature = crate::mock::test_sign(account, &payload);
 }
 
 /// §12.3: `SortKey = (action_class, action_nonce, arrival_index)`.
@@ -2269,7 +2284,9 @@ fn a_forged_action_is_skipped_without_aborting_the_batch() {
             1,
             ExchangeAction::Place(gtc(8, Side::Buy, 60_000, 100)),
         );
-        forged.signature = TestSignature(ALICE); // BOB's action, ALICE's signature
+        // BOB's action carrying ALICE's signature: valid bytes, wrong signer.
+        forged.signature =
+            crate::mock::test_sign(ALICE, &ExchangeCore::signed_action_payload(&forged));
 
         assert_ok!(ExchangeCore::execute_exchange_batch(
             RuntimeOrigin::none(),
@@ -2325,13 +2342,17 @@ fn a_signed_action_cannot_be_replayed() {
 fn a_non_zero_subaccount_is_refused() {
     new_test_ext().execute_with(|| {
         setup_traders();
-        let signed = |subaccount, action| crate::types::SignedExchangeAction {
-            signer: TestSigner(ALICE),
-            subaccount,
-            action_nonce: 1,
-            action,
-            // The test double accepts exactly this relation.
-            signature: TestSignature(ALICE),
+        let signed = |subaccount, action| {
+            let mut signed = crate::types::SignedExchangeAction {
+                signer: TestSigner(ALICE),
+                subaccount,
+                action_nonce: 1,
+                expires_at: System::block_number() + 100,
+                action,
+                signature: TestSignature(ALICE, sp_core::ecdsa::Signature::default()),
+            };
+            sign(&mut signed);
+            signed
         };
 
         // The pool must refuse it too, or it would queue an action the chain then drops.
@@ -2353,6 +2374,101 @@ fn a_non_zero_subaccount_is_refused() {
         assert_eq!(crate::ActionNonce::<Test>::get(ALICE, 7), 0);
         assert!(Accounts::<Test>::get(ALICE, 7).is_none());
         assert!(crate::UserOrderByClientId::<Test>::get((ALICE, DEFAULT_SUBACCOUNT, 9)).is_none());
+    });
+}
+
+/// The signed payload binds the chain it was signed on (S1-1).
+///
+/// It used to be `(subaccount, nonce, action)`, which is the same bytes everywhere: a
+/// signature could be replayed on any chain that shares the encoding. Moving the genesis hash
+/// out from under a signed action must invalidate it, and must cost the account nothing.
+#[test]
+fn a_signature_is_bound_to_the_chain_it_was_signed_on() {
+    new_test_ext().execute_with(|| {
+        setup_traders();
+        let mut action =
+            signed_action(ALICE, 1, ExchangeAction::Place(gtc(9, Side::Buy, 60_000, 1)));
+
+        // Re-sign the same action on another chain: only the genesis hash differs.
+        frame_system::BlockHash::<Test>::insert(0u64, sp_core::H256([0x5au8; 32]));
+        sign(&mut action);
+        // ...and back on this chain, whose genesis hash is what it always was.
+        frame_system::BlockHash::<Test>::insert(0u64, sp_core::H256([0u8; 32]));
+
+        assert_ok!(ExchangeCore::execute_exchange_batch(
+            RuntimeOrigin::none(),
+            BoundedVec::truncate_from(vec![action])
+        ));
+
+        // Refused, and nothing consumed: the account can simply re-sign here.
+        assert_eq!(crate::ActionNonce::<Test>::get(ALICE, DEFAULT_SUBACCOUNT), 0);
+        assert!(Positions::<Test>::get((ALICE, DEFAULT_SUBACCOUNT, MARKET)).is_none());
+    });
+}
+
+/// A signature is only valid inside its own window (S1-1).
+///
+/// The nonce prevents *reuse*, not *late use*: without `expires_at` a cancel signed today
+/// would stay executable for as long as the nonce had not been passed, which for a leaked
+/// signature is forever. Refusing it must not consume the nonce either, or the account would
+/// pay for an attacker's timing.
+#[test]
+fn a_signature_expires() {
+    new_test_ext().execute_with(|| {
+        setup_traders();
+        let mut action =
+            signed_action(ALICE, 1, ExchangeAction::Place(gtc(9, Side::Buy, 60_000, 1)));
+
+        // Already expired by the time it runs.
+        action.expires_at = System::block_number();
+        sign(&mut action);
+        assert_ok!(ExchangeCore::execute_exchange_batch(
+            RuntimeOrigin::none(),
+            BoundedVec::truncate_from(vec![action.clone()])
+        ));
+        assert_eq!(crate::ActionNonce::<Test>::get(ALICE, DEFAULT_SUBACCOUNT), 0);
+
+        // Valid, but beyond `MaxOrderLifetime` (28 800): no expiry in effect, so also refused.
+        action.expires_at = System::block_number() + 28_801;
+        sign(&mut action);
+        assert_ok!(ExchangeCore::execute_exchange_batch(
+            RuntimeOrigin::none(),
+            BoundedVec::truncate_from(vec![action])
+        ));
+        assert_eq!(crate::ActionNonce::<Test>::get(ALICE, DEFAULT_SUBACCOUNT), 0);
+        assert!(Positions::<Test>::get((ALICE, DEFAULT_SUBACCOUNT, MARKET)).is_none());
+    });
+}
+
+/// Golden vector: the exact bytes a signature covers, as a digest.
+///
+/// The payload is the protocol now — domain, version, chain, sub-account, nonce, expiry,
+/// action. Changing any of them must show up here as a different digest, not as signatures
+/// that quietly stop verifying everywhere at once. The test ext is deterministic (genesis
+/// hash zero, block number 1), so this value is reproducible.
+#[test]
+fn the_signed_payload_is_a_golden_vector() {
+    new_test_ext().execute_with(|| {
+        setup_traders();
+        let action = signed_action(
+            ALICE,
+            7,
+            ExchangeAction::Place(gtc(9, Side::Buy, 60_000, 100)),
+        );
+        let payload = ExchangeCore::signed_action_payload(&action);
+
+        // The head is what makes this payload *this* payload. SCALE writes `&[u8]`
+        // length-prefixed, and the compact length of a 21-byte slice is `21 << 2`.
+        assert_eq!(payload[0], SIGNED_ACTION_DOMAIN.len() as u8 * 4);
+        assert_eq!(&payload[1..=SIGNED_ACTION_DOMAIN.len()], SIGNED_ACTION_DOMAIN);
+        let at = SIGNED_ACTION_DOMAIN.len() + 1;
+        assert_eq!(&payload[at..at + 2], &SIGNED_ACTION_VERSION.to_le_bytes());
+
+        // The digest is the golden vector: change the payload for any reason and this fails,
+        // which is the point — a payload change must be a deliberate, visible act.
+        let digest: String =
+            sp_io::hashing::keccak_256(&payload).iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(digest, "13add7a9b574dc717e2933c5f85168a697a4b5113955ee288560ef4a91ade3a5");
     });
 }
 

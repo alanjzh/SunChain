@@ -100,6 +100,37 @@
 
 **验收**：`cargo test -p pallet-exchange-core` 全过 + 新增 20+ 用例；`cargo test -p sunchain-runtime --features try-runtime --test migration` 过；dev 链 `--fresh` 重启后 `dex-cli` 下单/撤单成功且 receipt 可查。
 
+#### S1-1 执行记录（2026-10-23 完成：签名 payload 版本化）
+
+**改动**
+
+- `types.rs`：`SignedExchangeAction` 新增 `expires_at: BlockNumber`（放在 `action` 前，SCALE 顺序即此）；新增 `SIGNED_ACTION_DOMAIN = b"sunchain:trade-action"` 与 `SIGNED_ACTION_VERSION = 1`。
+- `lib.rs`：新增 `Pallet::signed_action_payload(action)` —— 单一构造点，payload 为
+  `(DOMAIN, VERSION, genesis_hash, subaccount, action_nonce, expires_at, action).encode()`；
+  `execute_exchange_batch` 与 `validate_signed_action` 都改用它（此前两处各自 `.encode()`，
+  存在漂移风险）。新增 `ensure_action_fresh`：`expires_at > now` 且
+  `expires_at <= now + MaxOrderLifetime`，**在 nonce 之前**校验（过期签名不消耗 nonce）。
+  新增错误码 `ActionExpired` / `InvalidActionExpiry`。
+- `mock.rs`：`TestSignature` 从"忽略消息的固定关系"改为**真实验签**（`keyring(account)` 确定性
+  ECDSA 密钥 + keccak digest + `recover_prehashed`）。这是本次能测到 payload 绑定的前提：
+  旧的 double 不看消息，payload 怎么改都测不出来。
+- `tests.rs`：`signed_action` helper 增加 `expires_at` 并真实签名；新增 3 个测试：
+  - `a_signature_is_bound_to_the_chain_it_was_signed_on`：同一条 action 在别的 genesis hash
+    下重签，回到本链后拒绝，且 nonce/仓位零变化；
+  - `a_signature_expires`：已过期、以及超过 `MaxOrderLifetime`（28 801）两种，均拒绝且不消耗 nonce；
+  - `the_signed_payload_is_a_golden_vector`：断言 payload 头部（compact 长度 + domain +
+    version LE）与 keccak digest 常量
+    `13add7a9b574dc717e2933c5f85168a697a4b5113955ee288560ef4a91ade3a5`。
+- `node/src/bin/dex-cli.rs`：不再本地拼 payload，改为 `in_ext(genesis, || CorePallet::<R>::signed_action_payload(&signed))`（外部性是因为 payload 读 genesis hash）；新增 `--action-expiry`（默认 100 块），与订单级 `--expiry` 分开；模块头文档同步。
+
+**验收结果（已实际执行）**
+
+- `cargo test -p pallet-exchange-core`：**106 passed**（103 + 3 个新测试）
+- `cargo test -p pallet-exchange-core --features try-runtime`：106 passed
+- `cargo check -p sunchain --bins`、`SKIP_WASM_BUILD=1 cargo check -p sunchain-runtime --features try-runtime`：通过
+
+**遗留**：dev 链端到端（`dex-cli buy` 全链路）未跑——需要重新构建节点并按 `--fresh` 重启 dev 链，见 §6。改后链上旧格式签名的 action 一律失效，属预期（版本号的意义）。
+
 ### S2 · node 交易路径与运营面（约 1.5–2 周）
 
 | # | 任务 | 位置 |
@@ -142,7 +173,7 @@
 在进入真实资产或 Native TradeDomain 抽取前，以下项目必须全部关闭：
 
 - [x] S0：非零 subaccount 被拒绝；all-features / try-runtime 构建通过；release 产物路径正确
-- [ ] S1：签名绑定 version / chain / domain / expiry，并有 golden vector
+- [x] S1：签名绑定 version / chain / domain / expiry，并有 golden vector
 - [ ] S1：每条 batch action 具备原子回滚、明确 nonce 语义（业务失败也消费）与 receipt
 - [ ] S1：排序规则可由 Runtime 验证，文档不再承诺本地 arrival 公平
 - [ ] S1：batch 实际 weight 与治理遍历 weight 与 benchmark 同维度

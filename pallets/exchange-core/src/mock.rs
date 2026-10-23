@@ -114,13 +114,30 @@ parameter_types! {
 mod test_sig {
     use codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
     use scale_info::TypeInfo;
+    use sp_core::crypto::Pair as _;
+    use sp_core::ecdsa;
     use sp_runtime::traits::{IdentifyAccount, Verify};
 
     use super::AccountId;
 
-    /// Not cryptography: a fixed relation between signer and "signature" that lets the tests
-    /// exercise both the accept and the reject path of batch authorisation. The production
-    /// runtime uses `MultiSignature` / `MultiSigner`.
+    /// The test double's key for an account.
+    ///
+    /// Deterministic, so a test can sign as anyone without carrying key material around.
+    /// Real signatures are the point: `TestSignature` used to ignore the message entirely,
+    /// so nothing about the signed payload — the domain, the version, the chain it was signed
+    /// on, the expiry — was ever actually tested, only who *claimed* to sign. A payload
+    /// change was therefore invisible to the whole suite.
+    pub fn keyring(account: AccountId) -> ecdsa::Pair {
+        let mut seed = [0u8; 32];
+        seed[..8].copy_from_slice(&account.to_le_bytes());
+        ecdsa::Pair::from_seed(&seed)
+    }
+
+    /// Signs `payload` as `account`, over the keccak digest the runtime re-derives.
+    pub fn test_sign(account: AccountId, payload: &[u8]) -> TestSignature {
+        TestSignature(account, keyring(account).sign_prehashed(&sp_io::hashing::keccak_256(payload)))
+    }
+
     #[derive(
         Clone,
         Copy,
@@ -142,6 +159,8 @@ mod test_sig {
         }
     }
 
+    /// `(claimed signer, signature)`. The production runtime uses `MultiSignature` /
+    /// `MultiSigner`; this keeps the same shape with a key the test controls.
     #[derive(
         Clone,
         Copy,
@@ -154,17 +173,25 @@ mod test_sig {
         TypeInfo,
         MaxEncodedLen,
     )]
-    pub struct TestSignature(pub AccountId);
+    pub struct TestSignature(pub AccountId, pub ecdsa::Signature);
 
     impl Verify for TestSignature {
         type Signer = TestSigner;
-        fn verify<L: sp_runtime::traits::Lazy<[u8]>>(&self, _msg: L, signer: &AccountId) -> bool {
-            self.0 == *signer
+        fn verify<L: sp_runtime::traits::Lazy<[u8]>>(&self, mut msg: L, signer: &AccountId) -> bool {
+            if self.0 != *signer {
+                return false
+            }
+            // Recover over the message the caller passed: a signature made over *other*
+            // bytes does not verify here, which is the whole point of signing a payload
+            // rather than an identity.
+            self.1
+                .recover_prehashed(&sp_io::hashing::keccak_256(msg.get()))
+                .is_some_and(|recovered| recovered == keyring(*signer).public())
         }
     }
 }
 
-pub use test_sig::{TestSignature, TestSigner};
+pub use test_sig::{keyring, test_sign, TestSignature, TestSigner};
 
 
 /// A price oracle the tests can set, standing in for `pallet-oracle`.

@@ -7,6 +7,9 @@
 //! * **order actions** are *off-chain signed payloads* submitted through
 //!   `exchange_submitAction`. The signature covers only
 //!   `(subaccount, action_nonce, action)`, and the identity lives in the `signer` field.
+//!   Since S1-1 the payload is wider — domain, version, chain, sub-account, nonce, expiry,
+//!   action — and is built by `Pallet::signed_action_payload`, never here: a payload
+//!   assembled in two places drifts, and the failure is a signature that verifies nowhere.
 //!
 //! Both paths are verified by `EthereumSignature`, which recovers over
 //! **`keccak256(payload)`**. `ecdsa::Pair::sign` hashes with blake2 instead, so signing here
@@ -41,6 +44,7 @@ use sunchain_runtime::{
 };
 use scale_codec::{Decode, Encode};
 use pallet_exchange_core::Call as CoreCall;
+use pallet_exchange_core::Pallet as CorePallet;
 use serde_json::{json, Value};
 use frame_support::crypto::ecdsa::ECDSAExt;
 use exchange_primitives::{price_to_ticks, FEED_SCALE};
@@ -233,7 +237,14 @@ fn main() {
 			// rejected with `InvalidExpiry` — after its nonce has been consumed, so retrying
 			// under the same nonce fails differently and the real cause never surfaces.
 			let expiry_blocks: BlockNumber = flag(&args, "--expiry", "10000").parse().expect("expiry");
-			let expires_at = head_block(&url) + expiry_blocks;
+			// How long the *signature* is good for. Not how long the order rests: a cancel
+			// signed today used to stay executable for as long as its nonce had not been
+			// passed, which for a leaked signature is forever (S1-1).
+			let action_expiry_blocks: BlockNumber =
+				flag(&args, "--action-expiry", "100").parse().expect("action-expiry");
+			let head = head_block(&url);
+			let expires_at = head + expiry_blocks;
+			let action_expires_at = head + action_expiry_blocks;
 
 			let action = ExchangeAction::Place(OrderRequest::<BlockNumber> {
 				market_id,
@@ -247,20 +258,23 @@ fn main() {
 				expires_at,
 			});
 			let subaccount = 0u32;
-			// Exactly what the runtime re-derives in `validate_signed_action`, then
-			// keccak'd — see the module docs.
-			let payload = (subaccount, nonce, &action).encode();
+			let mut signed = ExchangeSignedAction {
+				signer: ExchangeSigner(who),
+				subaccount,
+				action_nonce: nonce,
+				expires_at: action_expires_at,
+				action,
+				// Replaced below with the real one; the payload does not cover it.
+				signature: ExchangeSignature([0u8; 65]),
+			};
+			// The pallet's own payload, built inside an externalities scope because it reads
+			// the genesis hash out of storage — the same reason `CheckGenesis` needs one.
+			let payload = in_ext(genesis, || CorePallet::<R>::signed_action_payload(&signed));
 			let signature = pair.sign_prehashed(&keccak_256(&payload));
 
 			let mut raw = [0u8; 65];
 			raw.copy_from_slice(&signature.0);
-			let signed = ExchangeSignedAction {
-				signer: ExchangeSigner(who),
-				subaccount,
-				action_nonce: nonce,
-				action,
-				signature: ExchangeSignature(raw),
-			};
+			signed.signature = ExchangeSignature(raw);
 			// Ask the runtime why before asking anyone to act. `submitAction` answers only
 			// "accepted into the pool", and the batch runs later — so a rejected order looks
 			// identical to a successful one from here, unless it is checked explicitly.

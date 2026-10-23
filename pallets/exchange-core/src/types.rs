@@ -505,6 +505,20 @@ pub struct SortKey {
     pub arrival_index: u32,
 }
 
+/// Domain tag for the bytes an action's signature covers (S1-1).
+///
+/// The payload used to be `(subaccount, action_nonce, action)`, which binds nothing: the
+/// same bytes verify on any chain, in any environment, for as long as the nonce has not been
+/// passed. A domain tag makes the *meaning* of the payload part of the payload, so a format
+/// change cannot be mistaken for a reuse.
+pub const SIGNED_ACTION_DOMAIN: &[u8] = b"sunchain:trade-action";
+
+/// Version of the signed-action domain (S1-1).
+///
+/// Bumping it invalidates every outstanding signature on purpose: the alternative is two
+/// payload formats that both "verify", which is how a stale client keeps signing forever.
+pub const SIGNED_ACTION_VERSION: u16 = 1;
+
 /// One user-signed action in a proposer-built `Exchange Batch` (§12.4).
 ///
 /// `signer` + `signature` are what authorise it — never the account that submitted the
@@ -517,6 +531,13 @@ pub struct SignedExchangeAction<Signer, Signature, BlockNumber> {
     pub signer: Signer,
     pub subaccount: exchange_primitives::SubaccountId,
     pub action_nonce: u64,
+    /// When the signature stops being valid, in blocks (S1-1).
+    ///
+    /// The nonce alone is not an expiry: a cancel signed today would stay valid for as long
+    /// as the nonce had not been passed, which for a leaked signature is forever. This
+    /// bounds the window for Cancel and CancelUpTo exactly as `OrderRequest::expires_at`
+    /// bounds Place — the two are independent, and both are signed.
+    pub expires_at: BlockNumber,
     pub action: ExchangeAction<BlockNumber>,
     pub signature: Signature,
 }

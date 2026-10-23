@@ -52,8 +52,8 @@ pub mod pallet {
         crosses, mul_div_ceil_u128, signed_lots, Account, AccountStatus, ActionClass, CancelReason,
         ClientOrderId, ExchangeAction, FeeTier, FeeTierId, Lots, Market, MarketConfig, MarketId,
         MarketStatus, MathError, Order, OrderId, OrderRequest, PartyState, Position, PriceLevel,
-        PriceTicks, QuoteAmount, RiskParams, Side, SignedExchangeAction, SignedQuote, SortKey,
-        TimeInForce, PPM_DENOM,
+        PriceTicks, QuoteAmount, RiskParams, Side, SIGNED_ACTION_DOMAIN, SIGNED_ACTION_VERSION,
+        SignedExchangeAction, SignedQuote, SortKey, TimeInForce, PPM_DENOM,
     };
     use alloc::vec::Vec;
     use codec::{Decode, Encode, MaxEncodedLen};
@@ -633,6 +633,13 @@ pub mod pallet {
         InvalidActionSignature,
         /// `action_nonce` must be greater than the last one consumed (never reused).
         InvalidActionNonce,
+        /// The signature has expired: `expires_at` is at or before the current block.
+        ///
+        /// Checked *before* the nonce is consumed, so an expired action leaves the account
+        /// exactly where it was and the same nonce can be re-signed.
+        ActionExpired,
+        /// The signature's `expires_at` is further out than `MaxOrderLifetime`.
+        InvalidActionExpiry,
         /// Sub-accounts are not supported yet.
         ///
         /// The nonce is keyed by `(account, subaccount)`, but orders, positions and
@@ -1085,7 +1092,7 @@ pub mod pallet {
                 let who = <T::Signer as sp_runtime::traits::IdentifyAccount>::into_account(
                     signed.signer.clone(),
                 );
-                let payload = (signed.subaccount, signed.action_nonce, &signed.action).encode();
+                let payload = Self::signed_action_payload(signed);
 
                 let outcome = (|| -> DispatchResult {
                     // Sub-accounts are keyed into the nonce but not into the trading state
@@ -1099,6 +1106,8 @@ pub mod pallet {
                         sp_runtime::traits::Verify::verify(&signed.signature, &payload[..], &who,),
                         Error::<T>::InvalidActionSignature
                     );
+                    // Expiry before the nonce, for the same reason (S1-1).
+                    Self::ensure_action_fresh(signed.expires_at)?;
                     let last = ActionNonce::<T>::get(&who, signed.subaccount);
                     ensure!(signed.action_nonce > last, Error::<T>::InvalidActionNonce);
                     ActionNonce::<T>::insert(&who, signed.subaccount, signed.action_nonce);
@@ -2869,6 +2878,47 @@ pub mod pallet {
             .build()
     }
 
+    /// The bytes an action's signature covers (S1-1).
+    ///
+    /// One function, called by the dispatchable, by `validate_signed_action` and by every
+    /// off-chain caller: a payload assembled in two places drifts the moment one side
+    /// changes, and the failure is a signature that verifies nowhere. The oracle's
+    /// `vote_payload` is the same pattern.
+    ///
+    /// It binds, in order: the domain and version (so the format itself is part of the
+    /// bytes), the chain (the genesis hash, so the signature is good here and nowhere
+    /// else), the sub-account, the nonce, the expiry, and the action.
+    pub fn signed_action_payload(
+        action: &SignedExchangeAction<T::Signer, T::Signature, BlockNumberFor<T>>,
+    ) -> Vec<u8> {
+        let genesis = frame_system::Pallet::<T>::block_hash(BlockNumberFor::<T>::zero());
+        (
+            SIGNED_ACTION_DOMAIN,
+            SIGNED_ACTION_VERSION,
+            genesis,
+            action.subaccount,
+            action.action_nonce,
+            action.expires_at,
+            &action.action,
+        )
+            .encode()
+    }
+
+    /// A signature is valid only inside its own window (S1-1).
+    ///
+    /// Bounded above by `MaxOrderLifetime` for the same reason a GTC order is: an expiry
+    /// arbitrarily far ahead is a signature with no expiry at all, and the nonce is no
+    /// substitute — it prevents *reuse*, not *late use*.
+    pub(crate) fn ensure_action_fresh(expires_at: BlockNumberFor<T>) -> DispatchResult {
+        let now = frame_system::Pallet::<T>::block_number();
+        ensure!(expires_at > now, Error::<T>::ActionExpired);
+        ensure!(
+            expires_at <= now.saturating_add(T::MaxOrderLifetime::get()),
+            Error::<T>::InvalidActionExpiry
+        );
+        Ok(())
+    }
+
     pub fn validate_signed_action(
             action: &SignedExchangeAction<T::Signer, T::Signature, BlockNumberFor<T>>,
         ) -> DispatchResult {
@@ -2880,11 +2930,14 @@ pub mod pallet {
                 action.subaccount == DEFAULT_SUBACCOUNT,
                 Error::<T>::SubaccountUnsupported
             );
-            let payload = (action.subaccount, action.action_nonce, &action.action).encode();
+            let payload = Self::signed_action_payload(action);
             ensure!(
                 sp_runtime::traits::Verify::verify(&action.signature, &payload[..], &who),
                 Error::<T>::InvalidActionSignature
             );
+            // Expiry before the nonce: an expired signature is a leaked signature, and
+            // refusing it must not cost the account anything.
+            Self::ensure_action_fresh(action.expires_at)?;
             let last = ActionNonce::<T>::get(&who, action.subaccount);
             ensure!(action.action_nonce > last, Error::<T>::InvalidActionNonce);
             Ok(())
