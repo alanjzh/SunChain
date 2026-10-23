@@ -100,8 +100,24 @@
   测试有效性已反向验证：把 `Rollback` 临时改成 `Commit`（即不回滚）后，第一个测试立即失败
   （maker 订单消失），恢复后通过。
 
-- **S1-3 canonical 排序（P0-4）**
-  `SortKey` 第三分量 `arrival_index` → `action_hash`；`validate_unsigned` 校验 batch 已按 SortKey 升序、同 `(signer, subaccount)` nonce 升序，否则 `InvalidTransaction`。改动 `types.rs:502/528`、`lib.rs:1063-1070`、`lib.rs:643-676`、`node/src/exchange_pool.rs:76-83`。文档改为"段内确定性"，不再承诺 arrival 公平。
+- **S1-3 canonical 排序（P0-4）** ✅ 已完成（2026-10-23）
+  `SortKey` 由 `(class, action_nonce, arrival_index)` 改为
+  `(class, account, action_nonce, action_hash)`：`account = blake2_256(signer, subaccount)`、
+  `action_hash = blake2_256(signer, subaccount, nonce, expiry, action)`，全部来自签名或签名
+  字节，提议者无法通过重排 batch 改变顺序。`account` 把同一账户的 action 聚在一起，因此
+  同一账户的多个 action 必然按 nonce 升序执行（否则第二个会因 nonce 被拒）。
+  - `validate_unsigned` 新增"batch 必须已按该键严格升序"校验，违反返回
+    `InvalidTransaction::Call`（重试同一笔无意义，所以不是 `Stale`）；
+  - dispatchable 内排序保留（防御性，到达执行的都是已排序的）；
+  - `node/src/exchange_pool.rs` 删掉 `arrival` / `next_arrival`，`pending()` 直接用新键；
+  - 删除 runtime 的 `ExchangeRuntimeApi::sort_key`（无调用方，且签名已过时）；
+  - 重写两个测试：`reordering_the_batch_does_not_reorder_the_trades`（交换 batch 中两个
+    action 的位置，成交结果不变，且成交者就是 canonical 顺序在前者）、
+    `an_out_of_order_batch_is_refused`（乱序被 `validate_unsigned` 拒、同序放行）；
+    pool 侧 `a_tie_is_broken_by_the_action_not_by_arrival`（提交顺序不影响序列）。
+  - 反向验证：删掉顺序校验 → 第一个测试失败；去掉 dispatchable 内排序 → 第二个测试失败。
+
+- **S1-4 weight 计量（P1-3）**
 - **S1-4 weight 计量（P1-3）**
   累计 `MatchStats{matches, stale_removed, level_scans}` 三项；`WeightInfo::execute_batch` 增加 `level_scans` 维度并重跑 benchmark（现有 benchmark 只放 resting 单且用 `RawOrigin::Signed`，与 `ensure_none` 不符）；`set_liquidity_tier` 独立 weight + benchmark。改动 `lib.rs:1072/1092/1123`、`weights.rs:37/141`、`benchmarking.rs:403`、`lib.rs:982`。
 - **S1-5 最小可用 receipt（P1-5 第一步）**
@@ -185,7 +201,7 @@
 - [x] S1：签名绑定 version / chain / domain / expiry，并有 golden vector
 - [x] S1：每条 batch action 具备原子回滚、明确 nonce 语义（业务失败也消费）与 receipt
   （回滚与 nonce 语义已落地；receipt 属 S1-5）
-- [ ] S1：排序规则可由 Runtime 验证，文档不再承诺本地 arrival 公平
+- [x] S1：排序规则可由 Runtime 验证，文档不再承诺本地 arrival 公平
 - [ ] S1：batch 实际 weight 与治理遍历 weight 与 benchmark 同维度
 - [ ] S2：P2P 限流不依赖收到消息数，含 peer / account 配额与大小检查
 - [ ] S2：batch 按 action 数、字节、weight、市场预算显式选择，未纳入有指标

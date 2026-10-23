@@ -23,22 +23,15 @@ pub enum Reject {
 	Duplicate,
 }
 
-struct Pending {
-	/// Position in arrival order; the tie-break of last resort (§12.3).
-	arrival: u32,
-	action: ExchangeSignedAction,
-}
-
 /// Actions waiting to be bundled.
 pub struct ExchangePool {
-	queue: BTreeMap<(Vec<u8>, u32, u64), Pending>,
-	next_arrival: u32,
+	queue: BTreeMap<(Vec<u8>, u32, u64), ExchangeSignedAction>,
 	limit: usize,
 }
 
 impl ExchangePool {
 	pub fn new(limit: usize) -> Self {
-		Self { queue: BTreeMap::new(), next_arrival: 0, limit }
+		Self { queue: BTreeMap::new(), limit }
 	}
 
 	/// Queues an action, rejecting duplicates and refusing to grow without bound.
@@ -61,23 +54,22 @@ impl ExchangePool {
 		if self.queue.len() >= self.limit {
 			return Err(Reject::Full)
 		}
-		let arrival = self.next_arrival;
-		self.next_arrival = self.next_arrival.wrapping_add(1);
-		self.queue.insert(key, Pending { arrival, action });
+		self.queue.insert(key, action);
 		Ok(())
 	}
 
-	/// Queued actions in deterministic execution order (§12.3).
+	/// Queued actions in deterministic execution order (§12.3 / S1-3).
 	///
-	/// The runtime re-sorts the batch regardless, so this is not what makes execution
-	/// deterministic. It is what makes the *selection* deterministic when there is more
-	/// demand than one batch can hold — otherwise whichever actions happened to arrive
-	/// first would win, and the proposer could be accused of favouring them.
+	/// The runtime re-sorts the batch and refuses one that is out of order, so this is not
+	/// what makes execution deterministic. It is what makes the *selection* deterministic
+	/// when there is more demand than one batch can hold — otherwise whichever actions
+	/// happened to arrive first would win, and the proposer could be accused of favouring
+	/// them. The key is signed throughout, so the order is the same everywhere.
 	pub fn pending(&self) -> Vec<(SortKey, ExchangeSignedAction)> {
 		let mut out: Vec<(SortKey, ExchangeSignedAction)> = self
 			.queue
 			.values()
-			.map(|p| (p.action.sort_key(p.arrival), p.action.clone()))
+			.map(|action| (action.sort_key(), action.clone()))
 			.collect();
 		out.sort_by_key(|(key, _)| *key);
 		out
@@ -90,7 +82,7 @@ impl ExchangePool {
 	/// Removing it at propose time instead would silently lose it whenever the block was
 	/// discarded or reorganised out.
 	pub fn retain_valid(&mut self, is_valid: impl Fn(&ExchangeSignedAction) -> bool) {
-		self.queue.retain(|_, p| is_valid(&p.action));
+		self.queue.retain(|_, action| is_valid(action));
 	}
 
 	pub fn len(&self) -> usize {
@@ -135,6 +127,7 @@ mod tests {
 			signer: ExchangeSigner(signer),
 			subaccount: 0,
 			action_nonce: nonce,
+			expires_at: 1_000,
 			action,
 			signature: ExchangeSignature([0u8; 65]),
 		}
@@ -182,9 +175,9 @@ mod tests {
 		assert_eq!(p.submit(action(1, 9, place()), |_| true), Err(Reject::Full));
 	}
 
-	/// §12.3: cancels before places, lower nonce first, arrival as the last tie-break.
+	/// §12.3 / S1-3: cancels before places, then account, then nonce.
 	#[test]
-	fn pending_is_ordered_by_class_then_nonce_then_arrival() {
+	fn pending_is_ordered_by_class_then_account_then_nonce() {
 		let mut p = pool();
 		// Submitted place-first, so only the sort can put the cancel ahead of it.
 		p.submit(action(1, 1, place()), |_| true).unwrap();
@@ -195,17 +188,29 @@ mod tests {
 		assert_eq!(ordered[1].0.class, ActionClass::Place);
 	}
 
+	/// A tie is broken by the action's own signed bytes, never by who arrived first (S1-3).
+	///
+	/// The key used to end in the arrival index — the one part of it the pool itself chose,
+	/// which is what let a proposer order the batch by submission time. Two accounts with the
+	/// same class and nonce now order by their signed bytes, so submitting them the other way
+	/// round yields the same sequence.
 	#[test]
-	fn arrival_breaks_ties_between_equal_keys() {
-		let mut p = pool();
-		// Identical class and nonce from different accounts: arrival decides.
-		p.submit(action(9, 1, place()), |_| true).unwrap();
-		p.submit(action(5, 1, place()), |_| true).unwrap();
+	fn a_tie_is_broken_by_the_action_not_by_arrival() {
+		let first = action(9, 1, place());
+		let second = action(5, 1, place());
 
-		let ordered = p.pending();
-		let mut expected = [0u8; 20];
-		expected[..8].copy_from_slice(&9u64.to_le_bytes());
-		assert_eq!(ordered[0].1.signer.0, expected, "first submitted is first served on a tie");
+		let order = |a: ExchangeSignedAction, b: ExchangeSignedAction| {
+			let mut p = pool();
+			p.submit(a, |_| true).unwrap();
+			p.submit(b, |_| true).unwrap();
+			p.pending().into_iter().map(|(_, action)| action.signer.0).collect::<Vec<_>>()
+		};
+
+		assert_eq!(
+			order(first.clone(), second.clone()),
+			order(second, first),
+			"the sequence must not depend on submission order"
+		);
 	}
 
 	#[test]

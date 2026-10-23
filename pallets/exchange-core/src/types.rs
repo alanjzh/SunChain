@@ -6,6 +6,7 @@
 
 use codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
+use sp_core::hashing::blake2_256;
 use sp_core::U256;
 
 // ----------------------------------------------------------------------------
@@ -481,10 +482,17 @@ pub enum ActionClass {
     Place = 2,
 }
 
-/// Deterministic ordering key (§12.3): `(action_class, action_nonce, arrival_index)`.
+/// Deterministic ordering key (§12.3, S1-3): `(class, account, action_nonce, action_hash)`.
 ///
-/// `arrival_index` only means something to the proposer that built the batch, but every
-/// validator replays the same ordered list, so the outcome is identical everywhere.
+/// Every component is signed, or derived from signed bytes, so the proposer that assembled
+/// the batch cannot change the order by rearranging it. It used to end in the position in the
+/// batch — which is exactly the thing the proposer chose, and the reason "the batch order is
+/// deterministic" was true while "the proposer cannot reorder" was not.
+///
+/// `account` hashes `(signer, subaccount)`, which groups one account's actions together. That
+/// is what makes several actions from one account run in nonce order: ordering by class alone
+/// could put a higher nonce first, and the second action would then be refused for a nonce it
+/// did not choose.
 #[derive(
     Clone,
     Copy,
@@ -501,8 +509,9 @@ pub enum ActionClass {
 )]
 pub struct SortKey {
     pub class: ActionClass,
+    pub account: [u8; 32],
     pub action_nonce: u64,
-    pub arrival_index: u32,
+    pub action_hash: [u8; 32],
 }
 
 /// Domain tag for the bytes an action's signature covers (S1-1).
@@ -542,15 +551,31 @@ pub struct SignedExchangeAction<Signer, Signature, BlockNumber> {
     pub signature: Signature,
 }
 
-impl<Signer, Signature, BlockNumber> SignedExchangeAction<Signer, Signature, BlockNumber>
+impl<Signer: Encode, Signature: Encode, BlockNumber: Encode> SignedExchangeAction<Signer, Signature, BlockNumber>
 where
     BlockNumber: Clone,
 {
-    pub fn sort_key(&self, arrival_index: u32) -> SortKey {
+    /// The canonical position of this action in a batch (S1-3).
+    ///
+    /// Derived from the action's own bytes, so it is the same for every validator and no
+    /// proposer can influence it. See [`SortKey`]. The signature is deliberately *not* part
+    /// of the hash: two actions with the same signer, sub-account, nonce and expiry are the
+    /// same action, and the strict-ascending check in `validate_unsigned` refuses the pair.
+    pub fn sort_key(&self) -> SortKey {
         SortKey {
             class: self.action.class(),
+            account: blake2_256(&(self.signer.encode(), self.subaccount).encode()),
             action_nonce: self.action_nonce,
-            arrival_index,
+            action_hash: blake2_256(
+                &(
+                    self.signer.encode(),
+                    self.subaccount,
+                    self.action_nonce,
+                    self.expires_at.clone(),
+                    &self.action,
+                )
+                    .encode(),
+            ),
         }
     }
 }

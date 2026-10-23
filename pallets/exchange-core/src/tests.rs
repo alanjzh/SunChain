@@ -2211,25 +2211,68 @@ fn sign(action: &mut crate::types::SignedExchangeAction<TestSigner, TestSignatur
     action.signature = crate::mock::test_sign(account, &payload);
 }
 
-/// §12.3: `SortKey = (action_class, action_nonce, arrival_index)`.
+/// §12.3 / S1-3: `SortKey = (class, account, action_nonce, action_hash)`.
+///
+/// Built from real actions rather than struct literals: the point of the new key is that none
+/// of it comes from the batch, so the assertions have to be about what a proposer *cannot*
+/// change.
 #[test]
-fn sort_key_orders_by_class_then_nonce_then_arrival() {
-    use crate::types::{ActionClass, SortKey};
+fn sort_key_orders_by_class_then_account_then_nonce() {
+    new_test_ext().execute_with(|| {
+        setup_traders();
 
-    let k = |class, action_nonce, arrival_index| SortKey {
-        class,
-        action_nonce,
-        arrival_index,
-    };
+        let cancel_alice = signed_action(ALICE, 5, ExchangeAction::CancelUpTo(1));
+        let place_alice = signed_action(ALICE, 5, ExchangeAction::Place(gtc(9, Side::Buy, 60_000, 1)));
+        let place_alice_earlier =
+            signed_action(ALICE, 2, ExchangeAction::Place(gtc(8, Side::Buy, 60_000, 1)));
+        let place_bob = signed_action(BOB, 3, ExchangeAction::Place(gtc(9, Side::Buy, 60_000, 1)));
 
-    // Non-risk first, then cancels, then places.
-    assert!(k(ActionClass::Other, 9, 9) < k(ActionClass::Cancel, 0, 0));
-    // Class dominates: a late-arriving cancel still precedes an early place.
-    assert!(k(ActionClass::Cancel, 9, 7) < k(ActionClass::Place, 1, 0));
-    // Within a class the lower nonce goes first, whatever the arrival order.
-    assert!(k(ActionClass::Place, 1, 9) < k(ActionClass::Place, 2, 0));
-    // Same class and nonce (different sub-accounts): arrival decides.
-    assert!(k(ActionClass::Cancel, 3, 0) < k(ActionClass::Cancel, 3, 1));
+        // Class dominates: a cancel goes before a place, whatever the nonces say.
+        assert!(cancel_alice.sort_key() < place_alice.sort_key());
+        // Same account, same class: the lower nonce first. This is what keeps several
+        // actions from one account executable in the order they were signed.
+        assert!(place_alice_earlier.sort_key() < place_alice.sort_key());
+        // Two accounts never compare equal, so the order is total and deterministic.
+        assert_ne!(place_alice.sort_key(), place_bob.sort_key());
+    });
+}
+
+/// A batch that is not in canonical order is refused, not reordered silently (S1-3).
+///
+/// The runtime still sorts before executing, so this is not about determinism — every
+/// validator replays the same list either way. It is that a proposer who chose the order
+/// should not have its choice honoured, and the only way to say so is to refuse the batch.
+#[test]
+fn an_out_of_order_batch_is_refused() {
+    use crate::{Call, TransactionSource, ValidateUnsigned};
+
+    new_test_ext().execute_with(|| {
+        setup_traders();
+        // The cancel sorts before the place, so the batch below is out of order.
+        let place = signed_action(ALICE, 5, ExchangeAction::Place(gtc(9, Side::Buy, 60_000, 1)));
+        let cancel = signed_action(ALICE, 5, ExchangeAction::CancelUpTo(1));
+
+        let unordered = frame_support::BoundedVec::truncate_from(vec![place.clone(), cancel.clone()]);
+        let ordered = frame_support::BoundedVec::truncate_from(vec![cancel, place]);
+        let call = |actions| Call::<Test>::execute_exchange_batch { actions };
+
+        assert!(
+            <ExchangeCore as ValidateUnsigned>::validate_unsigned(
+                TransactionSource::Local,
+                &call(unordered)
+            )
+            .is_err(),
+            "a proposer-chosen order must not be accepted"
+        );
+        assert!(
+            <ExchangeCore as ValidateUnsigned>::validate_unsigned(
+                TransactionSource::Local,
+                &call(ordered)
+            )
+            .is_ok(),
+            "the same actions in canonical order must pass"
+        );
+    });
 }
 
 /// The submitter is only a courier: an action is authorised by its own signature.
@@ -2592,46 +2635,55 @@ fn the_signed_payload_is_a_golden_vector() {
     });
 }
 
-/// Within a class, arrival order decides who is filled — not the submitter's whim.
+/// Reordering the batch does not reorder the trades (S1-3).
+///
+/// The old key ended in the position in the batch, so whoever assembled it chose the order —
+/// and the test that claimed to show the submitter could not reorder in fact showed that it
+/// could. The tie-break is now the hash of the action's own signed bytes, so swapping two
+/// actions in the batch swaps nothing.
 #[test]
-fn arrival_index_breaks_ties_so_the_submitter_cannot_reorder() {
+fn reordering_the_batch_does_not_reorder_the_trades() {
     new_test_ext().execute_with(|| {
         setup_traders();
-        // Only 100 lots of liquidity, so exactly one of the two buys can fill.
-        assert_ok!(ExchangeCore::place_order(
-            RuntimeOrigin::signed(BOB),
-            gtc(1, Side::Sell, 60_000, 100)
-        ));
+        let first = signed_action(CHARLIE, 1, ExchangeAction::Place(gtc(7, Side::Buy, 60_000, 100)));
+        let second = signed_action(ALICE, 1, ExchangeAction::Place(gtc(8, Side::Buy, 60_000, 100)));
+        let charlie_key = first.sort_key();
+        let alice_key = second.sort_key();
 
-        assert_ok!(ExchangeCore::execute_exchange_batch(
-            RuntimeOrigin::none(),
-            BoundedVec::truncate_from(vec![
-                signed_action(
-                    CHARLIE,
-                    1,
-                    ExchangeAction::Place(gtc(7, Side::Buy, 60_000, 100))
-                ),
-                signed_action(
-                    ALICE,
-                    1,
-                    ExchangeAction::Place(gtc(8, Side::Buy, 60_000, 100))
-                ),
-            ])
-        ));
+        let fills = |order: Vec<crate::types::SignedExchangeAction<TestSigner, TestSignature, u64>>| {
+            new_test_ext().execute_with(|| {
+                setup_traders();
+                // Only 100 lots of liquidity, so exactly one of the two buys can fill.
+                assert_ok!(ExchangeCore::place_order(
+                    RuntimeOrigin::signed(BOB),
+                    gtc(1, Side::Sell, 60_000, 100)
+                ));
+                assert_ok!(ExchangeCore::execute_exchange_batch(
+                    RuntimeOrigin::none(),
+                    BoundedVec::truncate_from(order)
+                ));
+                (
+                    Positions::<Test>::get((CHARLIE, DEFAULT_SUBACCOUNT, MARKET))
+                        .map(|p| p.size_lots)
+                        .unwrap_or(0),
+                    Positions::<Test>::get((ALICE, DEFAULT_SUBACCOUNT, MARKET))
+                        .map(|p| p.size_lots)
+                        .unwrap_or(0),
+                )
+            })
+        };
 
-        // CHARLIE was first in the batch, so CHARLIE gets the fill.
-        assert_eq!(
-            Positions::<Test>::get((CHARLIE, DEFAULT_SUBACCOUNT, MARKET))
-                .unwrap()
-                .size_lots,
-            100
-        );
-        assert_eq!(
-            Positions::<Test>::get((ALICE, DEFAULT_SUBACCOUNT, MARKET))
-                .unwrap()
-                .size_lots,
-            0
-        );
+        let forward = fills(vec![first.clone(), second.clone()]);
+        let reversed = fills(vec![second, first]);
+        assert_eq!(forward, reversed, "the batch order must not decide the fill");
+
+        // The fill goes to whoever the canonical order puts first — whichever that is, and
+        // the same answer either way round.
+        if charlie_key < alice_key {
+            assert_eq!(forward, (100, 0));
+        } else {
+            assert_eq!(forward, (0, 100));
+        }
     });
 }
 

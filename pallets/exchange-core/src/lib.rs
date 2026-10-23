@@ -670,6 +670,22 @@ pub mod pallet {
 				return InvalidTransaction::Call.into()
 			}
 
+			// The batch must already be in canonical order (S1-3).
+			//
+			// The key is (class, account, nonce, action hash): signed, or derived from signed
+			// bytes, so a proposer cannot choose it. An out-of-order batch therefore means the
+			// proposer chose an order — the exact thing this check exists to prevent. Rejecting
+			// with `Call` rather than `Stale`: re-submitting the same batch would fail the same
+			// way, so there is nothing to wait for.
+			let mut previous: Option<SortKey> = None;
+			for action in actions.iter() {
+				let key = action.sort_key();
+				if previous.is_some_and(|prev| prev >= key) {
+					return InvalidTransaction::Call.into()
+				}
+				previous = Some(key);
+			}
+
 			// Reject a batch that provably cannot do anything — every action already
 			// consumed or badly signed. Otherwise the pool could fill with unsigned entries
 			// that are guaranteed no-ops. Advisory only: the replay inside the call
@@ -1078,12 +1094,15 @@ pub mod pallet {
 		}
             ensure!(!actions.is_empty(), Error::<T>::TooManyActions);
 
-            // Deterministic order (§12.3). The arrival index is the position in the batch, so
-            // keys are unique and the sort is total — every validator derives the same list.
+            // Deterministic order (§12.3 / S1-3). The key is (class, account, nonce, action
+            // hash) — all of it signed or derived from signed bytes — so the proposer that
+            // built the batch cannot change the order by rearranging it. `validate_unsigned`
+            // refuses a batch that is not already in this order, so the sort here is a
+            // formality for anything that reached execution.
             let mut ordered: Vec<(SortKey, usize)> = actions
                 .iter()
                 .enumerate()
-                .map(|(i, a)| (a.sort_key(i as u32), i))
+                .map(|(i, a)| (a.sort_key(), i))
                 .collect();
             ordered.sort_by_key(|(key, _)| *key);
 

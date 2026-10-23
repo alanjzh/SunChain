@@ -42,12 +42,6 @@ sp_api::decl_runtime_apis! {
         /// than assuming a tick size, because a mismatch is silent and off by orders of
         /// magnitude.
         fn tick_size_quote(market_id: u32) -> Option<u128>;
-        /// Ordering key (§12.3), so every proposer derives the same sequence.
-        fn sort_key(
-            action: pallet_exchange_core::types::ExchangeAction<BlockNumber>,
-            action_nonce: u64,
-            arrival_index: u32,
-        ) -> pallet_exchange_core::types::SortKey;
     }
 }
 
@@ -660,18 +654,6 @@ impl_runtime_apis! {
 
         fn tick_size_quote(market_id: u32) -> Option<u128> {
             pallet_exchange_core::Pallet::<Runtime>::tick_size_of(market_id)
-        }
-
-        fn sort_key(
-            action: pallet_exchange_core::types::ExchangeAction<BlockNumber>,
-            action_nonce: u64,
-            arrival_index: u32,
-        ) -> pallet_exchange_core::types::SortKey {
-            pallet_exchange_core::types::SortKey {
-                class: action.class(),
-                action_nonce,
-                arrival_index,
-            }
         }
     }
 
