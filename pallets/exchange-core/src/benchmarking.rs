@@ -110,6 +110,20 @@ fn install_market<T: Config>() {
     Markets::<T>::insert(BENCH_MARKET, bench_market::<T>());
     NextMarketId::<T>::put(BENCH_MARKET + 1);
     PrimaryMarketId::<T>::put(BENCH_MARKET);
+    // A market with no oracle price fails every order with `MarkPriceStale`. Seed one so any
+    // benchmark that places / cancels / matches has a fresh mark; benchmarks that need a
+    // specific level (e.g. the liquidation ones) set their own afterwards.
+    //
+    // Two oracle paths, because there are two ways a benchmark runs:
+    //   * the `benchmark` CLI runs against a real runtime whose `PriceOracle` is
+    //     `BenchmarkOracle` (swapped in under `runtime-benchmarks`) — seed that;
+    //   * `cargo test --features runtime-benchmarks` runs the generated wrappers against the
+    //     mock (`impl_benchmark_test_suite!`), whose oracle is `TestOracle` — seed that too.
+    // The mock lives behind `#[cfg(test)]`, so the second seed is cfg-gated to keep the
+    // non-test benchmark build (runtime WASM) free of a mock dependency.
+    BenchmarkOracle::set_price(BENCH_MARKET, MARK);
+    #[cfg(test)]
+    crate::mock::TestOracle::set(BENCH_MARKET, MARK);
 }
 
 /// The same market, on a given tier, so a tier refresh has something to refresh (S1-4).
@@ -218,7 +232,7 @@ mod benchmarks {
         // price chain before it can link the new level in.
         for i in 0..l {
             Pallet::<T>::place_order(
-                RawOrigin::Signed(maker.clone()).into(),
+                RawOrigin::Signed(maker.clone()).into(), 0,
                 resting_request::<T>(i as ClientOrderId + 1, Side::Buy, 60_000 - i as u64, 10),
             )
             .unwrap();
@@ -242,7 +256,7 @@ mod benchmarks {
             .min(T::MaxOrdersPerLevel::get());
         for i in 0..s {
             Pallet::<T>::place_order(
-                RawOrigin::Signed(maker.clone()).into(),
+                RawOrigin::Signed(maker.clone()).into(), 0,
                 resting_request::<T>(i as ClientOrderId + 1, Side::Sell, 60_000, 10),
             )
             .unwrap();
@@ -333,7 +347,7 @@ mod benchmarks {
         let victim: T::AccountId = account("victim", 0, 0);
         setup_account::<T>(&victim, 31_000u128 * m as u128);
         Pallet::<T>::place_order(
-            RawOrigin::Signed(victim.clone()).into(),
+            RawOrigin::Signed(victim.clone()).into(), 0,
             resting_request::<T>(1, Side::Buy, 60_000, qty),
         )
         .unwrap();
@@ -344,10 +358,12 @@ mod benchmarks {
         // `best_bid` / `best_ask` / the level counts and throw away the liquidity we just
         // placed, which shows up as `LiquidationSlippageExceeded`.
         BenchmarkOracle::set_price(BENCH_MARKET, 57_000);
+        #[cfg(test)]
+        crate::mock::TestOracle::set(BENCH_MARKET, 57_000);
 
         #[block]
         {
-            Pallet::<T>::liquidate_account(&victim, &victim, BENCH_MARKET, 0)
+            Pallet::<T>::liquidate_account(&victim, &victim, 0, BENCH_MARKET, 0)
                 .map_err(|_| BenchmarkError::Stop("liquidate_account"))?;
         }
 
@@ -368,7 +384,7 @@ mod benchmarks {
         )
         .unwrap();
         Pallet::<T>::place_order(
-            RawOrigin::Signed(caller.clone()).into(),
+            RawOrigin::Signed(caller.clone()).into(), 0,
             resting_request::<T>(1, Side::Buy, 60_000, 1_000),
         )
         .unwrap();
@@ -379,7 +395,7 @@ mod benchmarks {
 
         #[block]
         {
-            Pallet::<T>::adl_close(&caller, BENCH_MARKET, 1_000, 57_000)
+            Pallet::<T>::adl_close(&caller, 0, BENCH_MARKET, 1_000, 57_000)
                 .map_err(|_| BenchmarkError::Stop("adl_close"))?;
         }
 
@@ -392,7 +408,7 @@ mod benchmarks {
         install_market::<T>();
         setup_account::<T>(&caller, DEPOSIT);
         Pallet::<T>::place_order(
-            RawOrigin::Signed(caller.clone()).into(),
+            RawOrigin::Signed(caller.clone()).into(), 0,
             resting_request::<T>(1, Side::Buy, 59_000, 100),
         )
         .unwrap();
@@ -502,7 +518,7 @@ mod benchmarks {
             .min(T::MaxOrdersPerLevel::get());
         for i in 0..r {
             Pallet::<T>::place_order(
-                RawOrigin::Signed(maker.clone()).into(),
+                RawOrigin::Signed(maker.clone()).into(), 0,
                 resting_request::<T>(i as ClientOrderId + 1, Side::Buy, 59_000 - i as u64, 10),
             )
             .unwrap();
