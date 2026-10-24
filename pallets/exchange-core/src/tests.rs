@@ -1501,6 +1501,138 @@ fn underwater_long() -> u128 {
         .collateral
 }
 
+/// Signed open interest of a market: Σ position.size_lots over every (account, sub-account).
+/// A CLOB pairs every fill one-long-to-one-short, so this must net to exactly zero.
+fn net_open_interest(market_id: MarketId) -> i64 {
+    Positions::<Test>::iter()
+        .filter(|((_, _, m), _)| *m == market_id)
+        .map(|(_, p)| p.size_lots)
+        .sum()
+}
+
+/// Conservation law for the book (S3 acceptance: 仓位 OI 守恒). Every match creates one long
+/// and one short of equal size, so the market's *signed* open interest — Σ size_lots — nets to
+/// zero. A book that leaks, double-counts or mis-signs a side would break this, and it is
+/// independent of any collateral accounting, which makes it the sharpest matching invariant.
+#[test]
+fn open_interest_nets_to_zero_across_a_match() {
+    new_test_ext().execute_with(|| {
+        setup_traders();
+        assert_eq!(net_open_interest(MARKET), 0, "no positions yet");
+
+        // Bob rests a bid; Alice crosses it. They match 500 lots.
+        assert_ok!(ExchangeCore::place_order(
+            RuntimeOrigin::signed(BOB),
+            0,
+            gtc(1, Side::Buy, 60_000, 500)
+        ));
+        assert_ok!(ExchangeCore::place_order(
+            RuntimeOrigin::signed(ALICE),
+            0,
+            gtc(1, Side::Sell, 60_000, 500)
+        ));
+
+        assert_eq!(net_open_interest(MARKET), 0, "a match makes equal and opposite positions");
+        assert_eq!(
+            Positions::<Test>::get((BOB, DEFAULT_SUBACCOUNT, MARKET)).unwrap().size_lots,
+            500,
+            "the buyer is long"
+        );
+        assert_eq!(
+            Positions::<Test>::get((ALICE, DEFAULT_SUBACCOUNT, MARKET)).unwrap().size_lots,
+            -500,
+            "the seller is short"
+        );
+    });
+}
+
+/// Custody conservation across a full open→close round trip (S3 acceptance: custody / FeePool /
+/// BadDebt 守恒). `internal_liabilities` folds in FeePool, unpaid keeper rebates, BadDebt and
+/// unsettled PnL, so `custody == internal_liabilities` is the master identity: nothing is minted
+/// or burned by trading, only moved between internal accounts. Checked with open positions and
+/// again once flat — a round trip at the entry price realises no PnL, so the books must balance.
+#[test]
+fn custody_is_conserved_across_a_match_round_trip() {
+    new_test_ext().execute_with(|| {
+        setup_traders();
+
+        // Open: Bob long 500, Alice short 500.
+        assert_ok!(ExchangeCore::place_order(
+            RuntimeOrigin::signed(BOB),
+            0,
+            gtc(1, Side::Buy, 60_000, 500)
+        ));
+        assert_ok!(ExchangeCore::place_order(
+            RuntimeOrigin::signed(ALICE),
+            0,
+            gtc(1, Side::Sell, 60_000, 500)
+        ));
+        assert_eq!(
+            ExchangeCore::custody_balance(),
+            ExchangeCore::internal_liabilities(),
+            "custody equals internal liabilities with open positions"
+        );
+
+        // Close the other way: both go flat, no price move so no PnL — only taker fees, which
+        // move collateral into FeePool, both internal.
+        assert_ok!(ExchangeCore::place_order(
+            RuntimeOrigin::signed(BOB),
+            0,
+            gtc(2, Side::Sell, 60_000, 500)
+        ));
+        assert_ok!(ExchangeCore::place_order(
+            RuntimeOrigin::signed(ALICE),
+            0,
+            gtc(2, Side::Buy, 60_000, 500)
+        ));
+
+        assert_eq!(net_open_interest(MARKET), 0, "round trip returns every account to flat");
+        assert_eq!(
+            ExchangeCore::custody_balance(),
+            ExchangeCore::internal_liabilities(),
+            "custody equals internal liabilities after the round trip"
+        );
+        // Fees were collected, so the pool is non-empty and is part of what custody now holds.
+        assert!(crate::FeePool::<Test>::get() > 0, "taker fees accrued to the pool");
+    });
+}
+
+/// Custody conservation across a liquidation (S3 acceptance: custody / Insurance / BadDebt
+/// 守恒). A liquidation is the one path that can push value *out* of the book — a keeper rebate,
+/// an insurance credit, and BadDebt for whatever the fund cannot cover. The master identity
+/// `custody == internal_liabilities` must survive all three: `internal_liabilities` already folds
+/// in FeePool, unpaid keeper rebates and BadDebt, and an insurance credit is a real transfer out
+/// of custody, so both sides move together. If it ever fails here, value has leaked.
+#[test]
+fn custody_is_conserved_across_a_liquidation() {
+    use exchange_primitives::ExchangeEngine;
+
+    new_test_ext().execute_with(|| {
+        let _ = underwater_long(); // Charlie is long and under maintenance margin.
+
+        // Liquidate Charlie to zero (keeper = Alice). The engine offsets at/into the book and
+        // books any shortfall to insurance / BadDebt.
+        let closed = ExchangeCore::liquidate_account(&ALICE, &CHARLIE, 0, MARKET, 0)
+            .expect("an underwater account is liquidatable");
+        assert!(closed > 0, "the liquidation closed lots");
+
+        // Charlie is flat, so his side of the book is gone.
+        assert_eq!(
+            Positions::<Test>::get((CHARLIE, DEFAULT_SUBACCOUNT, MARKET))
+                .map(|p| p.size_lots)
+                .unwrap_or(0),
+            0,
+            "the liquidated position is closed"
+        );
+        // The master identity holds through the liquidation — no value leaked.
+        assert_eq!(
+            ExchangeCore::custody_balance(),
+            ExchangeCore::internal_liabilities(),
+            "custody equals internal liabilities through a liquidation"
+        );
+    });
+}
+
 #[test]
 fn healthy_account_is_not_liquidatable() {
     use exchange_primitives::ExchangeEngine;
