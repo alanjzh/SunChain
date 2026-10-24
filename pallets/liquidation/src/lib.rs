@@ -78,6 +78,10 @@ pub mod pallet {
 		/// ADL was requested for an account with no recorded residual loss.
 		NoResidualLoss,
 		/// None of the proposed candidates qualified for ADL.
+		///
+		/// Best-effort (S3-2 A): this means none of the keeper's *proposed* accounts were
+		/// eligible — **not** that no eligible account exists chain-wide. A keeper hitting this
+		/// should propose a different set; there is no global scan to fall back on until option B.
 		NoAdlCandidates,
 		ArithmeticOverflow,
 	}
@@ -128,6 +132,13 @@ pub mod pallet {
 		/// order comes from [`selection::select_adl_targets`] rather than the keeper, and the
 		/// recorded residual loss is left untouched — only the insurance fund or governance may
 		/// reduce it.
+		///
+		/// **Best-effort (S3-2 A):** `candidates` is the keeper's proposed set, expanded here into
+		/// each account's sub-accounts. The runtime enforces eligibility and order over that set
+		/// but never scans the whole book, so ADL is *not* globally fair — an eligible account
+		/// nobody proposed is left alone, and the notional actually shed can fall short of the
+		/// budget when the set runs out (visible in the `AutoDeleveraged` event's `lots`). The
+		/// globally-fair bounded scan is option B, deferred; see `selection` and the plan doc.
 		#[pallet::call_index(1)]
 		#[pallet::weight(T::WeightInfo::adl(T::MaxLiquidationsPerCall::get()))]
 		pub fn adl(

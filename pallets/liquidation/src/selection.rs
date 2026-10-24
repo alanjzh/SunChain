@@ -5,6 +5,24 @@
 //! is never the keeper's: verified candidates are ranked by `(roe desc, account asc)`, so any
 //! two keepers proposing the same set produce byte-identical outcomes.
 //!
+//! ## This is best-effort, not globally fair (S3-2 A)
+//!
+//! The keeper proposes the **set**; the runtime only enforces two things about it — *eligibility*
+//! (opposite side, profitable, `>= min_roe_ppm`) and *order* (`roe desc, account asc`). Nothing
+//! scans the whole book, so an eligible account the keeper left out is simply never considered:
+//! a keeper may propose a subset and thereby bias *which* accounts are force-reduced, within the
+//! eligibility rules. Two keepers proposing different sets can therefore reach different
+//! outcomes, and the globally most-profitable eligible account is only ever ADL'd if someone
+//! happened to propose it.
+//!
+//! That is an accepted limitation, not an oversight. It bounds the work per block while keeping
+//! every individual ADL correct (no account is reduced below its eligibility, no loss is
+//! allocated). The fix that restores global fairness — a bounded, verifiable scan with a
+//! pagination cursor and multi-block scheduling — is designed but deliberately deferred as
+//! option B; see `docs/Sunchain-DEX-Remediation-Plan.md` (S3-2). `the_set_is_the_keepers_...`
+//! below locks this limitation in so a future change cannot silently claim fairness it does not
+//! have.
+//!
 //! This module is deliberately a pure function over a ranking closure, so the ordering rule can
 //! be unit tested without storage, a runtime or an exchange core.
 
@@ -17,6 +35,10 @@ use sp_std::vec::Vec;
 /// `bankrupt_sign` is the sign of the position being offset: `+1` when a long went bankrupt, so
 /// the candidates must be short. An account is dropped unless it holds the opposite side, is
 /// profitable, and clears `min_roe_ppm`.
+///
+/// **Best-effort (S3-2 A):** `proposed` is the keeper's chosen set. Only its members are ever
+/// ranked, so the result is the best `max` of *that set* — never a claim about the whole book.
+/// See the module docs for why that is acceptable and what option B would change.
 pub fn select_adl_targets<AccountId: Encode + Clone>(
 	proposed: impl IntoIterator<Item = AccountId>,
 	rank: impl Fn(&AccountId) -> Option<AdlRank>,
@@ -146,5 +168,23 @@ mod tests {
 		let rank_of = |w: &u64| ranks.iter().find(|(k, _)| k == w).map(|(_, r)| *r);
 		let out = select_adl_targets([1u64, 2, 3], rank_of, 1, 0, 2);
 		assert_eq!(out, vec![3, 2], "at most `max`, best first");
+	}
+
+	/// Best-effort, not globally fair (S3-2 A): the keeper proposes the *set*, so an eligible
+	/// account left out of the proposal is never discovered — even a strictly better one. This
+	/// locks the accepted limitation in, so a future change cannot quietly claim global fairness.
+	#[test]
+	fn the_set_is_the_keepers_so_adl_is_best_effort_not_globally_fair() {
+		// Account 9 is the globally most-profitable eligible short, but the keeper proposes only
+		// 3 and 7. The result is exactly the proposed subset — 9 is never considered, even though
+		// a full scan would have picked it first.
+		let ranks = [
+			(3u64, rank(-10, 500, 50_000)),
+			(7u64, rank(-10, 400, 40_000)),
+			(9u64, rank(-10, 900, 90_000)),
+		];
+		let rank_of = |w: &u64| ranks.iter().find(|(k, _)| k == w).map(|(_, r)| *r);
+		let out = select_adl_targets([7u64, 3], rank_of, 1, 0, 8);
+		assert_eq!(out, vec![3, 7], "only the proposed set is ranked; 9 is not discovered");
 	}
 }
