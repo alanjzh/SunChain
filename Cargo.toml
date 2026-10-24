@@ -38,7 +38,9 @@ default-members = [
   "pallets/exchange-primitives",
   "pallets/insurance",
   "pallets/liquidation",
-  "pallets/oracle"
+  "pallets/oracle",
+  "admin",
+  "langto_binding"
 ]
 
 [workspace.dependencies]

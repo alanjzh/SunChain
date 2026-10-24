@@ -63,6 +63,22 @@ jobs:
         run: SKIP_WASM_BUILD=1 cargo doc --workspace --no-deps
         timeout-minutes: 15
 
+  check-wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/free-disk-space
+      - uses: ./.github/actions/ubuntu-dependencies
+
+      # The default `build` job runs everything with SKIP_WASM_BUILD, so a break that only
+      # shows up in the no_std/WASM target is otherwise caught solely by the slow release
+      # node build. This checks the runtime compiles to the WASM the chain actually executes,
+      # quickly and on its own (S3-3).
+      - name: Check the runtime compiles to WASM
+        run: cargo check -p sunchain-runtime
+        timeout-minutes: 30
+
   run-node:
     runs-on: ${{ matrix.os }}
     strategy:
