@@ -3011,28 +3011,21 @@ pub mod pallet {
             // That settle runs on a now-flat position, so it cannot tell which side the loss
             // came from. Record it here while it is still known: ADL candidate selection keys
             // off `side_sign`, and a `0` there silently disables the direction filter (§8.5).
-            let side = if position.size_lots > 0 {
-                -1
-            } else if position.size_lots < 0 {
+            // `signed` is the delta just applied: selling to close a long means the bankrupt
+            // was long (+1); buying to close a short means it was short (-1).
+            let known_side = if signed < 0 {
                 1
+            } else if signed > 0 {
+                -1
             } else {
                 0
             };
-            if side != 0 || true {
-                let known_side = if signed < 0 {
-                    1
-                } else if signed > 0 {
-                    -1
-                } else {
-                    0
-                };
-                if known_side != 0 {
-                    ResidualLossOf::<T>::mutate((who, sub), |loss| {
-                        if loss.amount > 0 && loss.side_sign == 0 {
-                            loss.side_sign = known_side
-                        }
-                    });
-                }
+            if known_side != 0 {
+                ResidualLossOf::<T>::mutate((who, sub), |loss| {
+                    if loss.amount > 0 && loss.side_sign == 0 {
+                        loss.side_sign = known_side
+                    }
+                });
             }
 
             Accounts::<T>::insert(who, sub, account);
