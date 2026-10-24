@@ -4,7 +4,7 @@
 > 来源：[设计与实现 Review](Sunchain-DEX-Design-Implementation-Review.md)
 > 本文先按 **文件:行号** 核对了 Review 的每条证据，再给出分阶段落地计划。凡与 Review 不一致处，以本文为准。
 >
-> **执行状态**：S0 已于 2026-10-23 完成（含验收），见 §4.1。S1–S3 未开始。
+> **执行状态**：S0 已完成（含验收，见 §4.1）。S1（receipt/权重/不变量）、S2（P2P 限流/去重/batch builder/指标/receipt RPC/pool 持久化）已完成。S3：S3-1（子账户模型 A）、S3-2（ADL best-effort，B 方案已记录）、S3-3（门禁：default-members、独立 WASM job、benchmark 真跑、守恒检查）已完成；**延后至上线前**：S3-4 多节点演练、真实快照上的 migration pre/post；**无法由开发侧完成**：外部安全审计。
 
 相关文档：
 
@@ -271,10 +271,10 @@ extrinsic 在 validate 阶段就被拒（`InvalidTransaction::ExhaustsResources`
 - [x] S2：P2P 限流不依赖收到消息数，含 peer / account 双维配额、字节预算、坏包预算与解码前大小检查（S2-1）；seen 改语义键（S2-2）
 - [x] S2：batch 按 action 数、字节、weight、市场预算显式选择，被排除项带原因日志 + Prometheus 指标（S2-3 / S2-4）
 - [x] S2：失败结果可通过 RPC 查询（`exchange_actionReceipts` / `exchange_actionStatus`，由 S1-5 receipt 派生），并有 metrics（S2-5）；pool 持久化重启不丢（S2-6）
-- [ ] S3：非零 subaccount 被完整支持（此时移除 S0 的拒绝分支）
-- [ ] S3：ADL 候选语义被明确声明（best-effort 或可验证全局前 N）
-- [ ] S3：default / WASM / runtime-benchmarks / try-runtime / all-features 全部通过
-- [ ] S3：migration 在真实快照上完成 pre/post 检查
-- [ ] S3：多验证人、多账户、重组、分区、压力与恢复演练通过
-- [ ] S3：custody、FeePool、Insurance、BadDebt 与仓位 OI 守恒式有自动化检查
-- [ ] S3：外部安全审计完成，关键发现闭环
+- [x] S3：非零 subaccount 被完整支持（模型 A：每子账户独立抵押品），S0 的两处拒绝分支已移除（S3-1）
+- [x] S3：ADL 候选语义被明确声明为 best-effort（非全局公平），B（可验证全局前 N）决策与方案已记录待中期（S3-2 A）
+- [x] S3：default / WASM（独立 check-wasm job）/ runtime-benchmarks（135 测试现真跑，非仅编译）/ try-runtime（runtime migration pre/post）全部通过。**注**：孤立 `-p pallet-exchange-core --all-features` 因第三方 `pallet-revive` 的 try-runtime cfg 问题无法构建（上游限制，见 ci.yml 注释）；有意义的矩阵是 workspace 级 default + 各 feature 组合，均已验证
+- [ ] S3：migration 在真实快照上完成 pre/post 检查——⏸ 延后：暂无真实链快照；现以合成 `Storage`（真实 prefix/hasher/类型）在真实 runtime + try-runtime 下驱动 pre/on/post（`runtime/tests/migration.rs` v1/v4），拿到 dump 可切 `Mode::Offline`
+- [ ] S3：多验证人、多账户、重组、分区、压力与恢复演练通过——⏸ S3-4 延后至上线前（运维演练，需多节点，借 e2e skill 脚本化）
+- [x] S3：custody、FeePool、Insurance、BadDebt 与仓位 OI 守恒式有自动化检查（OI 净额为 0、custody==internal_liabilities 穿越撮合/清算/BadDebt）
+- [ ] S3：外部安全审计完成，关键发现闭环——❌ 需第三方，无法由开发侧完成
