@@ -330,6 +330,14 @@ type Migrations = (
 		pallet_exchange_core::Pallet<Runtime>,
 		<Runtime as frame_system::Config>::DbWeight,
 	>,
+	// S3-1: `Order` gained a `subaccount` field; drop pre-S3-1 orders that no longer decode.
+	frame_support::migrations::VersionedMigration<
+		3,
+		4,
+		pallet_exchange_core::migrations::v4::Migration<Runtime>,
+		pallet_exchange_core::Pallet<Runtime>,
+		<Runtime as frame_system::Config>::DbWeight,
+	>,
 );
 
 /// Executive: handles dispatch to the various modules.

@@ -85,9 +85,53 @@ fn setup_traders() {
         fund(who, 10_000_000_000);
         assert_ok!(ExchangeCore::deposit_collateral(
             RuntimeOrigin::signed(who),
-            10_000_000_000
+             0, 10_000_000_000
         ));
     }
+}
+
+/// S3-1 / model A: collateral is isolated per sub-account. Funds in one sub-account cannot be
+/// consumed by, or withdrawn through, another — the property that makes a sub-account a real
+/// risk boundary rather than just a label.
+#[test]
+fn collateral_is_isolated_per_sub_account() {
+    new_test_ext().execute_with(|| {
+        setup_market();
+        fund(ALICE, 3_000_000);
+        assert_ok!(ExchangeCore::deposit_collateral(
+            RuntimeOrigin::signed(ALICE),
+            0,
+            1_000_000
+        ));
+        assert_ok!(ExchangeCore::deposit_collateral(
+            RuntimeOrigin::signed(ALICE),
+            5,
+            2_000_000
+        ));
+
+        // Each sub-account tracks only its own deposit.
+        assert_eq!(Accounts::<Test>::get(ALICE, 0).unwrap().collateral, 1_000_000);
+        assert_eq!(Accounts::<Test>::get(ALICE, 5).unwrap().collateral, 2_000_000);
+
+        // Withdrawing from sub-5 leaves sub-0's balance untouched.
+        assert_ok!(ExchangeCore::withdraw_collateral(
+            RuntimeOrigin::signed(ALICE),
+            5,
+            500_000
+        ));
+        assert_eq!(
+            Accounts::<Test>::get(ALICE, 0).unwrap().collateral,
+            1_000_000,
+            "sub-0 is untouched by a sub-5 withdrawal"
+        );
+        assert_eq!(Accounts::<Test>::get(ALICE, 5).unwrap().collateral, 1_500_000);
+
+        // Sub-0 cannot over-withdraw against sub-5's funds — collateral is not shared.
+        assert_noop!(
+            ExchangeCore::withdraw_collateral(RuntimeOrigin::signed(ALICE), 0, 1_000_001),
+            Error::<Test>::InsufficientCollateral
+        );
+    });
 }
 
 // ---------------------------------------------------------------- collateral
@@ -99,7 +143,7 @@ fn deposit_and_withdraw_are_conservative() {
         fund(ALICE, 1_000_000);
         assert_ok!(ExchangeCore::deposit_collateral(
             RuntimeOrigin::signed(ALICE),
-            1_000_000
+             0, 1_000_000
         ));
         assert_eq!(
             Accounts::<Test>::get(ALICE, DEFAULT_SUBACCOUNT)
@@ -112,7 +156,7 @@ fn deposit_and_withdraw_are_conservative() {
 
         assert_ok!(ExchangeCore::withdraw_collateral(
             RuntimeOrigin::signed(ALICE),
-            400_000
+             0, 400_000
         ));
         assert_eq!(
             Accounts::<Test>::get(ALICE, DEFAULT_SUBACCOUNT)
@@ -123,7 +167,7 @@ fn deposit_and_withdraw_are_conservative() {
         assert_eq!(ExchangeCore::custody_balance(), 600_000);
 
         assert_noop!(
-            ExchangeCore::withdraw_collateral(RuntimeOrigin::signed(ALICE), 600_001),
+            ExchangeCore::withdraw_collateral(RuntimeOrigin::signed(ALICE), 0, 600_001),
             Error::<Test>::InsufficientCollateral
         );
     });
@@ -141,7 +185,7 @@ fn custody_account_holds_every_collateral_unit() {
         fund(ALICE, 1_000_000);
         assert_ok!(ExchangeCore::deposit_collateral(
             RuntimeOrigin::signed(ALICE),
-            1_000_000
+             0, 1_000_000
         ));
         assert_eq!(Assets::balance(USDC, custody), 1_000_000);
         assert_eq!(
@@ -153,7 +197,7 @@ fn custody_account_holds_every_collateral_unit() {
         // deposits (min_balance / existential deposit of the collateral asset).
         assert_ok!(ExchangeCore::withdraw_collateral(
             RuntimeOrigin::signed(ALICE),
-            1_000_000
+             0, 1_000_000
         ));
         assert_eq!(Assets::balance(USDC, custody), 0);
         assert_eq!(
@@ -163,7 +207,7 @@ fn custody_account_holds_every_collateral_unit() {
 
         assert_ok!(ExchangeCore::deposit_collateral(
             RuntimeOrigin::signed(ALICE),
-            5
+             0, 5
         ));
         assert_eq!(Assets::balance(USDC, custody), 5);
         assert_eq!(
@@ -177,7 +221,7 @@ fn custody_account_holds_every_collateral_unit() {
 fn deposit_of_zero_is_rejected() {
     new_test_ext().execute_with(|| {
         assert_noop!(
-            ExchangeCore::deposit_collateral(RuntimeOrigin::signed(ALICE), 0),
+            ExchangeCore::deposit_collateral(RuntimeOrigin::signed(ALICE), 0, 0),
             Error::<Test>::InvalidAmount
         );
     });
@@ -190,12 +234,12 @@ fn withdrawal_is_blocked_by_open_order_margin() {
         fund(ALICE, 1_000_000);
         assert_ok!(ExchangeCore::deposit_collateral(
             RuntimeOrigin::signed(ALICE),
-            1_000_000
+             0, 1_000_000
         ));
         // 1_000 lots @ 60_000 -> notional 60_000_000; IM 5% = 3_000_000 - too big, so scale down.
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(ALICE),
-            gtc(1, Side::Buy, 60_000, 300)
+             0, gtc(1, Side::Buy, 60_000, 300)
         ));
         // reserved = 5% * 18_000_000 = 900_000; only 100_000 is still free.
         assert_eq!(
@@ -205,12 +249,12 @@ fn withdrawal_is_blocked_by_open_order_margin() {
             900_000
         );
         assert_noop!(
-            ExchangeCore::withdraw_collateral(RuntimeOrigin::signed(ALICE), 200_000),
+            ExchangeCore::withdraw_collateral(RuntimeOrigin::signed(ALICE), 0, 200_000),
             Error::<Test>::InsufficientCollateral
         );
         assert_ok!(ExchangeCore::withdraw_collateral(
             RuntimeOrigin::signed(ALICE),
-            100_000
+             0, 100_000
         ));
     });
 }
@@ -260,7 +304,7 @@ fn gtc_order_rests_and_updates_best_price() {
         setup_traders();
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(ALICE),
-            gtc(1, Side::Buy, 59_000, 1_000)
+             0, gtc(1, Side::Buy, 59_000, 1_000)
         ));
         let market = Markets::<Test>::get(MARKET).unwrap();
         assert_eq!(market.best_bid, Some(59_000));
@@ -285,13 +329,13 @@ fn bid_chain_descends_and_ask_chain_ascends() {
         for (i, price) in [58_000u64, 59_000, 57_000].into_iter().enumerate() {
             assert_ok!(ExchangeCore::place_order(
                 RuntimeOrigin::signed(ALICE),
-                gtc(i as ClientOrderId + 1, Side::Buy, price, 100)
+                 0, gtc(i as ClientOrderId + 1, Side::Buy, price, 100)
             ));
         }
         for (i, price) in [62_000u64, 61_000, 63_000].into_iter().enumerate() {
             assert_ok!(ExchangeCore::place_order(
                 RuntimeOrigin::signed(BOB),
-                gtc(i as ClientOrderId + 1, Side::Sell, price, 100)
+                 0, gtc(i as ClientOrderId + 1, Side::Sell, price, 100)
             ));
         }
         let market = Markets::<Test>::get(MARKET).unwrap();
@@ -314,10 +358,10 @@ fn duplicate_client_order_id_is_rejected() {
         setup_traders();
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(ALICE),
-            gtc(1, Side::Buy, 59_000, 100)
+             0, gtc(1, Side::Buy, 59_000, 100)
         ));
         assert_noop!(
-            ExchangeCore::place_order(RuntimeOrigin::signed(ALICE), gtc(1, Side::Buy, 58_000, 100)),
+            ExchangeCore::place_order(RuntimeOrigin::signed(ALICE), 0, gtc(1, Side::Buy, 58_000, 100)),
             Error::<Test>::DuplicateClientOrderId
         );
     });
@@ -331,11 +375,11 @@ fn fifo_within_a_price_level() {
         setup_traders();
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(BOB),
-            gtc(1, Side::Sell, 60_000, 500)
+             0, gtc(1, Side::Sell, 60_000, 500)
         ));
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(BOB),
-            gtc(2, Side::Sell, 60_000, 500)
+             0, gtc(2, Side::Sell, 60_000, 500)
         ));
         assert_eq!(
             ExchangeCore::level_queue(MARKET, Side::Sell, 60_000).len(),
@@ -344,7 +388,7 @@ fn fifo_within_a_price_level() {
 
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(ALICE),
-            gtc(1, Side::Buy, 60_000, 750)
+             0, gtc(1, Side::Buy, 60_000, 750)
         ));
 
         assert_eq!(
@@ -386,15 +430,15 @@ fn price_priority_consumes_the_best_level_first() {
         setup_traders();
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(BOB),
-            gtc(1, Side::Sell, 60_000, 300)
+             0, gtc(1, Side::Sell, 60_000, 300)
         ));
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(BOB),
-            gtc(2, Side::Sell, 61_000, 300)
+             0, gtc(2, Side::Sell, 61_000, 300)
         ));
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(ALICE),
-            gtc(1, Side::Buy, 61_000, 400)
+             0, gtc(1, Side::Buy, 61_000, 400)
         ));
         // 300 at 60_000 then 100 at 61_000.
         assert_eq!(Orders::<Test>::get(MARKET, 1), None);
@@ -412,11 +456,11 @@ fn trade_emits_event_and_collects_fees() {
         setup_traders();
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(BOB),
-            gtc(1, Side::Sell, 60_000, 1_000)
+             0, gtc(1, Side::Sell, 60_000, 1_000)
         ));
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(ALICE),
-            gtc(1, Side::Buy, 60_000, 1_000)
+             0, gtc(1, Side::Buy, 60_000, 1_000)
         ));
         System::assert_has_event(RuntimeEvent::ExchangeCore(Event::TradeExecuted {
             market_id: MARKET,
@@ -442,11 +486,11 @@ fn partial_fill_releases_reserve_pro_rata() {
         setup_traders();
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(BOB),
-            gtc(1, Side::Sell, 60_000, 1_000)
+             0, gtc(1, Side::Sell, 60_000, 1_000)
         ));
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(ALICE),
-            gtc(1, Side::Buy, 60_000, 400)
+             0, gtc(1, Side::Buy, 60_000, 400)
         ));
         // Bob sold 400 of 1_000; 60% of the reserve stays locked.
         assert_eq!(
@@ -476,7 +520,7 @@ fn cancel_order_releases_all_reserved_margin() {
         setup_traders();
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(ALICE),
-            gtc(1, Side::Buy, 59_000, 1_000)
+             0, gtc(1, Side::Buy, 59_000, 1_000)
         ));
         assert_eq!(
             Accounts::<Test>::get(ALICE, DEFAULT_SUBACCOUNT)
@@ -484,7 +528,7 @@ fn cancel_order_releases_all_reserved_margin() {
                 .reserved_open_order_margin,
             2_950_000
         );
-        assert_ok!(ExchangeCore::cancel_order(RuntimeOrigin::signed(ALICE), 1));
+        assert_ok!(ExchangeCore::cancel_order(RuntimeOrigin::signed(ALICE), 0, 1));
         let account = Accounts::<Test>::get(ALICE, DEFAULT_SUBACCOUNT).unwrap();
         assert_eq!(account.reserved_open_order_margin, 0);
         assert_eq!(account.open_order_count, 0);
@@ -504,17 +548,17 @@ fn cancel_up_to_invalidates_orders_lazily() {
         setup_traders();
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(ALICE),
-            gtc(1, Side::Buy, 59_000, 100)
+             0, gtc(1, Side::Buy, 59_000, 100)
         ));
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(ALICE),
-            gtc(2, Side::Buy, 58_000, 100)
+             0, gtc(2, Side::Buy, 58_000, 100)
         ));
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(ALICE),
-            gtc(3, Side::Buy, 57_000, 100)
+             0, gtc(3, Side::Buy, 57_000, 100)
         ));
-        assert_ok!(ExchangeCore::cancel_up_to(RuntimeOrigin::signed(ALICE), 3));
+        assert_ok!(ExchangeCore::cancel_up_to(RuntimeOrigin::signed(ALICE), 0, 3));
         assert_eq!(
             Accounts::<Test>::get(ALICE, DEFAULT_SUBACCOUNT)
                 .unwrap()
@@ -525,7 +569,7 @@ fn cancel_up_to_invalidates_orders_lazily() {
         // A taker that would cross the invalidated bids drops them instead of trading.
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(BOB),
-            ioc(1, Side::Sell, 57_000, 100)
+             0, ioc(1, Side::Sell, 57_000, 100)
         ));
         System::assert_has_event(RuntimeEvent::ExchangeCore(Event::OrderCancelled {
             who: ALICE,
@@ -565,12 +609,12 @@ fn prune_orders_removes_expired_orders() {
         setup_traders();
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(ALICE),
-            gtc(1, Side::Buy, 59_000, 100)
+             0, gtc(1, Side::Buy, 59_000, 100)
         ));
         System::set_block_number(2_000);
         assert_ok!(ExchangeCore::prune_orders(
             RuntimeOrigin::signed(BOB),
-            MARKET,
+             MARKET,
             Side::Buy,
             10
         ));
@@ -597,10 +641,10 @@ fn only_the_owner_can_cancel() {
         setup_traders();
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(ALICE),
-            gtc(1, Side::Buy, 59_000, 100)
+             0, gtc(1, Side::Buy, 59_000, 100)
         ));
         assert_noop!(
-            ExchangeCore::cancel_order(RuntimeOrigin::signed(BOB), 1),
+            ExchangeCore::cancel_order(RuntimeOrigin::signed(BOB), 0, 1),
             Error::<Test>::OrderNotFound
         );
     });
@@ -614,17 +658,17 @@ fn post_only_rejects_crossing_orders() {
         setup_traders();
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(BOB),
-            gtc(1, Side::Sell, 60_000, 100)
+             0, gtc(1, Side::Sell, 60_000, 100)
         ));
         let mut crossing = req(1, Side::Buy, 61_000, 100);
         crossing.post_only = true;
         assert_noop!(
-            ExchangeCore::place_order(RuntimeOrigin::signed(ALICE), crossing),
+            ExchangeCore::place_order(RuntimeOrigin::signed(ALICE), 0, crossing),
             Error::<Test>::PostOnlyWouldCross
         );
         let mut ok = req(1, Side::Buy, 59_000, 100);
         ok.post_only = true;
-        assert_ok!(ExchangeCore::place_order(RuntimeOrigin::signed(ALICE), ok));
+        assert_ok!(ExchangeCore::place_order(RuntimeOrigin::signed(ALICE), 0, ok));
     });
 }
 
@@ -635,7 +679,7 @@ fn post_only_requires_gtc() {
         let mut bad = ioc(1, Side::Buy, 59_000, 100);
         bad.post_only = true;
         assert_noop!(
-            ExchangeCore::place_order(RuntimeOrigin::signed(ALICE), bad),
+            ExchangeCore::place_order(RuntimeOrigin::signed(ALICE), 0, bad),
             Error::<Test>::PostOnlyRequiresGtc
         );
     });
@@ -648,7 +692,7 @@ fn reduce_only_cannot_increase_or_open() {
         let mut flat = req(1, Side::Sell, 60_000, 100);
         flat.reduce_only = true;
         assert_noop!(
-            ExchangeCore::place_order(RuntimeOrigin::signed(ALICE), flat),
+            ExchangeCore::place_order(RuntimeOrigin::signed(ALICE), 0, flat),
             Error::<Test>::ReduceOnlyWouldIncrease
         );
 
@@ -656,17 +700,17 @@ fn reduce_only_cannot_increase_or_open() {
         fund(CHARLIE, 10_000_000_000);
         assert_ok!(ExchangeCore::deposit_collateral(
             RuntimeOrigin::signed(CHARLIE),
-            10_000_000_000
+             0, 10_000_000_000
         ));
 
         // Open a long of 500 for ALICE against BOB.
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(BOB),
-            gtc(1, Side::Sell, 60_000, 500)
+             0, gtc(1, Side::Sell, 60_000, 500)
         ));
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(ALICE),
-            gtc(1, Side::Buy, 60_000, 500)
+             0, gtc(1, Side::Buy, 60_000, 500)
         ));
         assert_eq!(
             Positions::<Test>::get((ALICE, DEFAULT_SUBACCOUNT, MARKET))
@@ -679,21 +723,21 @@ fn reduce_only_cannot_increase_or_open() {
         let mut too_big = req(2, Side::Sell, 60_000, 501);
         too_big.reduce_only = true;
         assert_noop!(
-            ExchangeCore::place_order(RuntimeOrigin::signed(ALICE), too_big),
+            ExchangeCore::place_order(RuntimeOrigin::signed(ALICE), 0, too_big),
             Error::<Test>::ReduceOnlyWouldIncrease
         );
 
         // CHARLIE rests a buy so ALICE can actually close her long via reduce_only.
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(CHARLIE),
-            gtc(1, Side::Buy, 60_000, 500)
+             0, gtc(1, Side::Buy, 60_000, 500)
         ));
 
         let mut close = ioc(2, Side::Sell, 60_000, 500);
         close.reduce_only = true;
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(ALICE),
-            close
+             0, close
         ));
         assert_eq!(
             Positions::<Test>::get((ALICE, DEFAULT_SUBACCOUNT, MARKET))
@@ -712,11 +756,11 @@ fn reduce_only_gtc_rests_and_never_reverses_position() {
         // ALICE goes long 500 against BOB.
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(BOB),
-            gtc(1, Side::Sell, 60_000, 500)
+             0, gtc(1, Side::Sell, 60_000, 500)
         ));
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(ALICE),
-            gtc(1, Side::Buy, 60_000, 500)
+             0, gtc(1, Side::Buy, 60_000, 500)
         ));
         assert_eq!(
             Positions::<Test>::get((ALICE, DEFAULT_SUBACCOUNT, MARKET))
@@ -730,7 +774,7 @@ fn reduce_only_gtc_rests_and_never_reverses_position() {
         close.reduce_only = true;
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(ALICE),
-            close
+             0, close
         ));
 
         assert_eq!(Markets::<Test>::get(MARKET).unwrap().best_ask, Some(61_000));
@@ -747,7 +791,7 @@ fn reduce_only_gtc_rests_and_never_reverses_position() {
         // When it is finally taken it flattens the long and never flips it short.
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(CHARLIE),
-            gtc(1, Side::Buy, 61_000, 500)
+             0, gtc(1, Side::Buy, 61_000, 500)
         ));
         assert_eq!(
             Positions::<Test>::get((ALICE, DEFAULT_SUBACCOUNT, MARKET))
@@ -770,11 +814,11 @@ fn ioc_remainder_is_cancelled() {
         setup_traders();
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(BOB),
-            gtc(1, Side::Sell, 60_000, 100)
+             0, gtc(1, Side::Sell, 60_000, 100)
         ));
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(ALICE),
-            ioc(1, Side::Buy, 60_000, 500)
+             0, ioc(1, Side::Buy, 60_000, 500)
         ));
         assert_eq!(
             Positions::<Test>::get((ALICE, DEFAULT_SUBACCOUNT, MARKET))
@@ -811,7 +855,7 @@ fn ioc_without_counterparty_does_not_rest() {
         setup_traders();
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(ALICE),
-            ioc(1, Side::Buy, 60_000, 100)
+             0, ioc(1, Side::Buy, 60_000, 100)
         ));
         assert_eq!(Markets::<Test>::get(MARKET).unwrap().best_bid, None);
         assert_eq!(
@@ -833,7 +877,7 @@ fn per_block_exchange_budget_is_enforced() {
 
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(ALICE),
-            gtc(1, Side::Buy, 59_000, 100)
+             0, gtc(1, Side::Buy, 59_000, 100)
         ));
         let (block, actions, _) = BlockExchangeUsage::<Test>::get().unwrap();
         assert_eq!(block, System::block_number());
@@ -846,7 +890,7 @@ fn per_block_exchange_budget_is_enforced() {
             Weight::zero(),
         ));
         assert_noop!(
-            ExchangeCore::place_order(RuntimeOrigin::signed(ALICE), gtc(2, Side::Buy, 58_000, 100)),
+            ExchangeCore::place_order(RuntimeOrigin::signed(ALICE), 0, gtc(2, Side::Buy, 58_000, 100)),
             Error::<Test>::ExchangeBlockBudgetExceeded
         );
 
@@ -854,7 +898,7 @@ fn per_block_exchange_budget_is_enforced() {
         System::set_block_number(System::block_number() + 1);
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(ALICE),
-            gtc(3, Side::Buy, 57_000, 100)
+             0, gtc(3, Side::Buy, 57_000, 100)
         ));
         assert_eq!(BlockExchangeUsage::<Test>::get().unwrap().1, 1);
     });
@@ -874,7 +918,7 @@ fn execute_batch_is_atomic_and_bounded() {
             ]);
         assert_ok!(ExchangeCore::execute_batch(
             RuntimeOrigin::signed(ALICE),
-            actions
+             0, actions
         ));
         assert_eq!(
             Accounts::<Test>::get(ALICE, DEFAULT_SUBACCOUNT)
@@ -894,7 +938,7 @@ fn execute_batch_is_atomic_and_bounded() {
                 ExchangeAction::Cancel(1),
             ]);
         assert_noop!(
-            ExchangeCore::execute_batch(RuntimeOrigin::signed(ALICE), bad),
+            ExchangeCore::execute_batch(RuntimeOrigin::signed(ALICE), 0, bad),
             Error::<Test>::OrderNotFound
         );
         assert_eq!(
@@ -913,13 +957,13 @@ fn insufficient_collateral_blocks_oversized_orders() {
         fund(ALICE, 1_000_000);
         assert_ok!(ExchangeCore::deposit_collateral(
             RuntimeOrigin::signed(ALICE),
-            1_000_000
+             0, 1_000_000
         ));
         // notional = 10_000 * 60_000 = 600_000_000; IM = 30_000_000 >> 1_000_000
         assert_noop!(
             ExchangeCore::place_order(
                 RuntimeOrigin::signed(ALICE),
-                gtc(1, Side::Buy, 60_000, 10_000)
+                 0, gtc(1, Side::Buy, 60_000, 10_000)
             ),
             Error::<Test>::InsufficientCollateral
         );
@@ -935,13 +979,13 @@ fn stale_mark_price_blocks_risk_growth() {
         // back on, which is the whole point of removing the cache.
         TestOracle::clear();
         assert_noop!(
-            ExchangeCore::place_order(RuntimeOrigin::signed(ALICE), gtc(1, Side::Buy, 60_000, 100)),
+            ExchangeCore::place_order(RuntimeOrigin::signed(ALICE), 0, gtc(1, Side::Buy, 60_000, 100)),
             Error::<Test>::MarkPriceStale
         );
         TestOracle::set(MARKET, 60_000);
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(ALICE),
-            gtc(1, Side::Buy, 60_000, 100)
+             0, gtc(1, Side::Buy, 60_000, 100)
         ));
     });
 }
@@ -955,20 +999,20 @@ fn underwater_account_is_restricted_and_may_only_reduce() {
         fund(BOB, 10_000_000_000);
         assert_ok!(ExchangeCore::deposit_collateral(
             RuntimeOrigin::signed(ALICE),
-            5_000_000
+             0, 5_000_000
         ));
         assert_ok!(ExchangeCore::deposit_collateral(
             RuntimeOrigin::signed(BOB),
-            10_000_000_000
+             0, 10_000_000_000
         ));
 
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(BOB),
-            gtc(1, Side::Sell, 60_000, 1_000)
+             0, gtc(1, Side::Sell, 60_000, 1_000)
         ));
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(ALICE),
-            gtc(1, Side::Buy, 60_000, 1_000)
+             0, gtc(1, Side::Buy, 60_000, 1_000)
         ));
         assert_eq!(
             Accounts::<Test>::get(ALICE, DEFAULT_SUBACCOUNT)
@@ -981,13 +1025,13 @@ fn underwater_account_is_restricted_and_may_only_reduce() {
         TestOracle::set(MARKET, 55_000);
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(BOB),
-            gtc(2, Side::Buy, 55_000, 1_000)
+             0, gtc(2, Side::Buy, 55_000, 1_000)
         ));
         let mut close = ioc(2, Side::Sell, 55_000, 1_000);
         close.reduce_only = true;
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(ALICE),
-            close
+             0, close
         ));
 
         let alice = Accounts::<Test>::get(ALICE, DEFAULT_SUBACCOUNT).unwrap();
@@ -1001,7 +1045,7 @@ fn underwater_account_is_restricted_and_may_only_reduce() {
 
         // A restricted account can no longer open new risk.
         assert_noop!(
-            ExchangeCore::place_order(RuntimeOrigin::signed(ALICE), gtc(3, Side::Buy, 55_000, 100)),
+            ExchangeCore::place_order(RuntimeOrigin::signed(ALICE), 0, gtc(3, Side::Buy, 55_000, 100)),
             Error::<Test>::AccountRestricted
         );
     });
@@ -1013,22 +1057,22 @@ fn realized_pnl_is_booked_on_close() {
         setup_traders();
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(BOB),
-            gtc(1, Side::Sell, 60_000, 1_000)
+             0, gtc(1, Side::Sell, 60_000, 1_000)
         ));
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(ALICE),
-            gtc(1, Side::Buy, 60_000, 1_000)
+             0, gtc(1, Side::Buy, 60_000, 1_000)
         ));
         // Bob provides a bid at 61_000; Alice closes into it.
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(BOB),
-            gtc(2, Side::Buy, 61_000, 1_000)
+             0, gtc(2, Side::Buy, 61_000, 1_000)
         ));
         let mut close = ioc(2, Side::Sell, 61_000, 1_000);
         close.reduce_only = true;
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(ALICE),
-            close
+             0, close
         ));
         let alice = Positions::<Test>::get((ALICE, DEFAULT_SUBACCOUNT, MARKET)).unwrap();
         assert_eq!(alice.size_lots, 0);
@@ -1049,23 +1093,23 @@ fn realised_loss_reduces_withdrawable_collateral() {
         setup_traders();
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(BOB),
-            gtc(1, Side::Sell, 60_000, 1_000)
+             0, gtc(1, Side::Sell, 60_000, 1_000)
         ));
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(ALICE),
-            gtc(1, Side::Buy, 60_000, 1_000)
+             0, gtc(1, Side::Buy, 60_000, 1_000)
         ));
 
         // Price falls: Bob bids 59_000 and Alice closes into it.
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(BOB),
-            gtc(2, Side::Buy, 59_000, 1_000)
+             0, gtc(2, Side::Buy, 59_000, 1_000)
         ));
         let mut close = ioc(2, Side::Sell, 59_000, 1_000);
         close.reduce_only = true;
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(ALICE),
-            close
+             0, close
         ));
 
         let alice = Positions::<Test>::get((ALICE, DEFAULT_SUBACCOUNT, MARKET)).unwrap();
@@ -1079,7 +1123,7 @@ fn realised_loss_reduces_withdrawable_collateral() {
             .collateral;
         assert_ok!(ExchangeCore::withdraw_collateral(
             RuntimeOrigin::signed(ALICE),
-            1
+             0, 1
         ));
         let after = Accounts::<Test>::get(ALICE, DEFAULT_SUBACCOUNT)
             .unwrap()
@@ -1103,11 +1147,11 @@ fn funding_index_move_is_charged_zero_sum_on_next_touch() {
         setup_traders();
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(BOB),
-            gtc(1, Side::Sell, 60_000, 1_000)
+             0, gtc(1, Side::Sell, 60_000, 1_000)
         ));
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(ALICE),
-            gtc(1, Side::Buy, 60_000, 1_000)
+             0, gtc(1, Side::Buy, 60_000, 1_000)
         ));
         // Alice is long 1_000, Bob short 1_000.
 
@@ -1125,11 +1169,11 @@ fn funding_index_move_is_charged_zero_sum_on_next_touch() {
 
         assert_ok!(ExchangeCore::withdraw_collateral(
             RuntimeOrigin::signed(ALICE),
-            1
+             0, 1
         ));
         assert_ok!(ExchangeCore::withdraw_collateral(
             RuntimeOrigin::signed(BOB),
-            1
+             0, 1
         ));
 
         // Long pays 1_000 * 10 = 10_000; short receives exactly the same amount.
@@ -1160,12 +1204,12 @@ fn maker_below_initial_margin_is_rejected() {
         fund(BOB, 3_000_000);
         assert_ok!(ExchangeCore::deposit_collateral(
             RuntimeOrigin::signed(BOB),
-            3_000_000
+             0, 3_000_000
         ));
         assert_noop!(
             ExchangeCore::place_order(
                 RuntimeOrigin::signed(BOB),
-                gtc(1, Side::Sell, 60_000, 1_000)
+                 0, gtc(1, Side::Sell, 60_000, 1_000)
             ),
             Error::<Test>::InsufficientCollateral
         );
@@ -1190,11 +1234,11 @@ fn maker_below_initial_margin_is_rejected() {
         fund(BOB, 10_000_000_000);
         assert_ok!(ExchangeCore::deposit_collateral(
             RuntimeOrigin::signed(BOB),
-            10_000_000_000
+             0, 10_000_000_000
         ));
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(BOB),
-            gtc(2, Side::Sell, 60_000, 1_000)
+             0, gtc(2, Side::Sell, 60_000, 1_000)
         ));
         assert_eq!(
             Accounts::<Test>::get(BOB, DEFAULT_SUBACCOUNT)
@@ -1219,7 +1263,7 @@ fn market_status_gates_actions() {
         setup_traders();
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(ALICE),
-            gtc(1, Side::Buy, 59_000, 100)
+             0, gtc(1, Side::Buy, 59_000, 100)
         ));
 
         assert_ok!(ExchangeCore::set_market_status(
@@ -1228,7 +1272,7 @@ fn market_status_gates_actions() {
             MarketStatus::ReduceOnly
         ));
         assert_noop!(
-            ExchangeCore::place_order(RuntimeOrigin::signed(BOB), gtc(1, Side::Sell, 60_000, 100)),
+            ExchangeCore::place_order(RuntimeOrigin::signed(BOB), 0, gtc(1, Side::Sell, 60_000, 100)),
             Error::<Test>::MarketReduceOnly
         );
 
@@ -1238,11 +1282,11 @@ fn market_status_gates_actions() {
             MarketStatus::CancelOnly
         ));
         assert_noop!(
-            ExchangeCore::place_order(RuntimeOrigin::signed(BOB), gtc(1, Side::Sell, 60_000, 100)),
+            ExchangeCore::place_order(RuntimeOrigin::signed(BOB), 0, gtc(1, Side::Sell, 60_000, 100)),
             Error::<Test>::MarketCancelOnly
         );
         // Cancels work in every market state.
-        assert_ok!(ExchangeCore::cancel_order(RuntimeOrigin::signed(ALICE), 1));
+        assert_ok!(ExchangeCore::cancel_order(RuntimeOrigin::signed(ALICE), 0, 1));
 
         assert_ok!(ExchangeCore::set_market_status(
             RuntimeOrigin::root(),
@@ -1250,7 +1294,7 @@ fn market_status_gates_actions() {
             MarketStatus::Paused
         ));
         assert_noop!(
-            ExchangeCore::place_order(RuntimeOrigin::signed(BOB), gtc(1, Side::Sell, 60_000, 100)),
+            ExchangeCore::place_order(RuntimeOrigin::signed(BOB), 0, gtc(1, Side::Sell, 60_000, 100)),
             Error::<Test>::MarketNotActive
         );
     });
@@ -1266,11 +1310,11 @@ fn too_many_open_orders_is_rejected() {
         for i in 1..=16u64 {
             assert_ok!(ExchangeCore::place_order(
                 RuntimeOrigin::signed(ALICE),
-                gtc(i, Side::Buy, 50_000 + i, 10)
+                 0, gtc(i, Side::Buy, 50_000 + i, 10)
             ));
         }
         assert_noop!(
-            ExchangeCore::place_order(RuntimeOrigin::signed(ALICE), gtc(17, Side::Buy, 49_000, 10)),
+            ExchangeCore::place_order(RuntimeOrigin::signed(ALICE), 0, gtc(17, Side::Buy, 49_000, 10)),
             Error::<Test>::TooManyOpenOrders
         );
     });
@@ -1282,14 +1326,14 @@ fn expired_orders_are_removed_by_the_matching_loop() {
         setup_traders();
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(BOB),
-            gtc(1, Side::Sell, 60_000, 100)
+             0, gtc(1, Side::Sell, 60_000, 100)
         ));
         // Move past the expiry of every order placed at block 1.
         System::set_block_number(2_000);
         TestOracle::set(MARKET, 60_000);
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(ALICE),
-            ioc(1, Side::Buy, 60_000, 100)
+             0, ioc(1, Side::Buy, 60_000, 100)
         ));
         // The expired maker is dropped instead of being filled.
         assert_eq!(
@@ -1323,18 +1367,18 @@ fn storage_stays_consistent_after_cancels_from_queue_middle() {
             for _ in 0..2 {
                 assert_ok!(ExchangeCore::place_order(
                     RuntimeOrigin::signed(ALICE),
-                    gtc(client, Side::Buy, price, 100)
+                     0, gtc(client, Side::Buy, price, 100)
                 ));
                 assert_ok!(ExchangeCore::place_order(
                     RuntimeOrigin::signed(BOB),
-                    gtc(client, Side::Buy, price, 100)
+                     0, gtc(client, Side::Buy, price, 100)
                 ));
                 client += 1;
             }
         }
         // 4 orders of 100 lots per level; cancel one from the middle of two different queues.
-        assert_ok!(ExchangeCore::cancel_order(RuntimeOrigin::signed(ALICE), 3));
-        assert_ok!(ExchangeCore::cancel_order(RuntimeOrigin::signed(BOB), 5));
+        assert_ok!(ExchangeCore::cancel_order(RuntimeOrigin::signed(ALICE), 0, 3));
+        assert_ok!(ExchangeCore::cancel_order(RuntimeOrigin::signed(BOB), 0, 5));
 
         let market = Markets::<Test>::get(MARKET).unwrap();
         assert_eq!(market.best_bid, Some(59_000));
@@ -1425,22 +1469,22 @@ fn underwater_long() -> u128 {
     fund(CHARLIE, 3_100_000);
     assert_ok!(ExchangeCore::deposit_collateral(
         RuntimeOrigin::signed(CHARLIE),
-        3_100_000
+         0, 3_100_000
     ));
     fund(BOB, 10_000_000_000);
     assert_ok!(ExchangeCore::deposit_collateral(
         RuntimeOrigin::signed(BOB),
-        10_000_000_000
+         0, 10_000_000_000
     ));
 
     // Charlie long 1_000 @ 60_000, Bob short 1_000.
     assert_ok!(ExchangeCore::place_order(
         RuntimeOrigin::signed(BOB),
-        gtc(1, Side::Sell, 60_000, 1_000)
+         0, gtc(1, Side::Sell, 60_000, 1_000)
     ));
     assert_ok!(ExchangeCore::place_order(
         RuntimeOrigin::signed(CHARLIE),
-        gtc(1, Side::Buy, 60_000, 1_000)
+         0, gtc(1, Side::Buy, 60_000, 1_000)
     ));
 
     // Mark falls to 57_000: unrealised −3_000_000, equity ≈ 70_000 against a maintenance
@@ -1449,7 +1493,7 @@ fn underwater_long() -> u128 {
     // Liquidity for the liquidation to sell into.
     assert_ok!(ExchangeCore::place_order(
         RuntimeOrigin::signed(BOB),
-        gtc(2, Side::Buy, 57_000, 1_000)
+         0, gtc(2, Side::Buy, 57_000, 1_000)
     ));
 
     Accounts::<Test>::get(CHARLIE, DEFAULT_SUBACCOUNT)
@@ -1465,14 +1509,14 @@ fn healthy_account_is_not_liquidatable() {
         setup_traders();
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(BOB),
-            gtc(1, Side::Sell, 60_000, 1_000)
+             0, gtc(1, Side::Sell, 60_000, 1_000)
         ));
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(ALICE),
-            gtc(1, Side::Buy, 60_000, 1_000)
+             0, gtc(1, Side::Buy, 60_000, 1_000)
         ));
         assert_noop!(
-            ExchangeCore::liquidate_account(&BOB, &ALICE, MARKET, 0),
+            ExchangeCore::liquidate_account(&BOB, &ALICE,  0, MARKET, 0),
             Error::<Test>::NotLiquidatable
         );
     });
@@ -1487,7 +1531,7 @@ fn liquidation_closes_the_position_and_funds_insurance() {
         let fund_before = Insurance::available();
 
         let closed =
-            ExchangeCore::liquidate_account(&ALICE, &CHARLIE, MARKET, 0).expect("liquidatable");
+            ExchangeCore::liquidate_account(&ALICE, &CHARLIE,  0, MARKET, 0).expect("liquidatable");
         assert!(closed > 0);
 
         // The position really shrank.
@@ -1529,7 +1573,7 @@ fn liquidation_routes_uncollectable_settlement_to_the_insurance_fund() {
         market.funding_index = 4_000;
         Markets::<Test>::insert(MARKET, market);
 
-        assert_ok!(ExchangeCore::liquidate_account(&ALICE, &CHARLIE, MARKET, 0));
+        assert_ok!(ExchangeCore::liquidate_account(&ALICE, &CHARLIE,  0, MARKET, 0));
 
         // The fund paid out, and nothing was left behind as bad debt.
         assert!(Insurance::available() < fund_before);
@@ -1549,7 +1593,7 @@ fn keeper_can_liquidate_and_is_paid_the_rebate() {
 
         assert_ok!(Liquidation::liquidate(
             RuntimeOrigin::signed(ALICE),
-            CHARLIE,
+             CHARLIE, 0,
             MARKET,
             0
         ));
@@ -1604,9 +1648,9 @@ fn uncovered_loss_is_recorded_as_residual_loss() {
         market.funding_index = 4_000;
         Markets::<Test>::insert(MARKET, market);
 
-        assert_ok!(ExchangeCore::liquidate_account(&ALICE, &CHARLIE, MARKET, 0));
+        assert_ok!(ExchangeCore::liquidate_account(&ALICE, &CHARLIE,  0, MARKET, 0));
 
-        let loss = crate::ResidualLossOf::<Test>::get(CHARLIE);
+        let loss = crate::ResidualLossOf::<Test>::get((CHARLIE, 0));
         assert!(
             loss.amount > 0,
             "the uncovered part must be recorded, not absorbed"
@@ -1618,7 +1662,7 @@ fn uncovered_loss_is_recorded_as_residual_loss() {
         // ADL is gated on that record existing — it passed the gate and then found no
         // qualifying candidates among an empty proposal.
         assert_noop!(
-            Liquidation::adl(RuntimeOrigin::signed(ALICE), CHARLIE, BoundedVec::default()),
+            Liquidation::adl(RuntimeOrigin::signed(ALICE), CHARLIE, 0, BoundedVec::default()),
             pallet_liquidation::Error::<Test>::NoAdlCandidates
         );
     });
@@ -1687,7 +1731,7 @@ fn exceeding_max_clearing_markets_is_refused() {
         fund(ALICE, 10_000_000_000);
         assert_ok!(ExchangeCore::deposit_collateral(
             RuntimeOrigin::signed(ALICE),
-            10_000_000_000
+             0, 10_000_000_000
         ));
 
         // Every market needs a price now that the cache is gone.
@@ -1709,7 +1753,7 @@ fn exceeding_max_clearing_markets_is_refused() {
         }
 
         assert_noop!(
-            ExchangeCore::place_order(RuntimeOrigin::signed(ALICE), gtc(1, Side::Buy, 60_000, 10)),
+            ExchangeCore::place_order(RuntimeOrigin::signed(ALICE), 0, gtc(1, Side::Buy, 60_000, 10)),
             Error::<Test>::TooManyClearingMarkets
         );
     });
@@ -1741,7 +1785,7 @@ fn maker_rebate_is_paid_from_the_fee_pool() {
         // Bob rests an offer (the maker leg), Alice takes it.
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(BOB),
-            gtc(1, Side::Sell, 60_000, 1_000)
+             0, gtc(1, Side::Sell, 60_000, 1_000)
         ));
         let bob_before = Accounts::<Test>::get(BOB, DEFAULT_SUBACCOUNT)
             .unwrap()
@@ -1749,7 +1793,7 @@ fn maker_rebate_is_paid_from_the_fee_pool() {
 
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(ALICE),
-            gtc(1, Side::Buy, 60_000, 1_000)
+             0, gtc(1, Side::Buy, 60_000, 1_000)
         ));
 
         // notional 60_000_000; fee 100ppm = 6_000, rebate 300ppm = 18_000.
@@ -1788,13 +1832,13 @@ fn rebate_with_empty_fee_pool_is_refused() {
 
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(BOB),
-            gtc(1, Side::Sell, 60_000, 1_000)
+             0, gtc(1, Side::Sell, 60_000, 1_000)
         ));
         // Zero fees are collected, so there is nothing to rebate from.
         assert_noop!(
             ExchangeCore::place_order(
                 RuntimeOrigin::signed(ALICE),
-                gtc(1, Side::Buy, 60_000, 1_000)
+                 0, gtc(1, Side::Buy, 60_000, 1_000)
             ),
             Error::<Test>::InsufficientFeePool
         );
@@ -1819,18 +1863,18 @@ fn adl_partially_reduces_a_profitable_opposite_account() {
             fund(who, 3_100_000);
             assert_ok!(ExchangeCore::deposit_collateral(
                 RuntimeOrigin::signed(who),
-                3_100_000
+                 0, 3_100_000
             ));
         }
 
         // One trade creates both sides: Alice sells 1_000 @ 60_000, Charlie buys it.
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(ALICE),
-            gtc(1, Side::Sell, 60_000, 1_000)
+             0, gtc(1, Side::Sell, 60_000, 1_000)
         ));
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(CHARLIE),
-            gtc(1, Side::Buy, 60_000, 1_000)
+             0, gtc(1, Side::Buy, 60_000, 1_000)
         ));
 
         // Mark down to 57_000: Alice is deep in profit, Charlie deeply underwater.
@@ -1842,14 +1886,14 @@ fn adl_partially_reduces_a_profitable_opposite_account() {
         Markets::<Test>::insert(MARKET, market);
 
         // Charlie's liquidation leaves an explicitly recorded residual loss.
-        assert_ok!(ExchangeCore::liquidate_account(&ALICE, &CHARLIE, MARKET, 0));
-        let loss = crate::ResidualLossOf::<Test>::get(CHARLIE);
+        assert_ok!(ExchangeCore::liquidate_account(&ALICE, &CHARLIE,  0, MARKET, 0));
+        let loss = crate::ResidualLossOf::<Test>::get((CHARLIE, 0));
         assert!(loss.amount > 0, "the uncovered loss must be recorded");
         assert_eq!(loss.market_id, MARKET);
         assert_eq!(loss.side_sign, 1, "Charlie was long");
 
         // Alice is short, profitable and clears the roe floor — a legitimate target.
-        let rank = ExchangeCore::adl_rank(&ALICE, MARKET).expect("must be rankable");
+        let rank = ExchangeCore::adl_rank(&ALICE,  0, MARKET).expect("must be rankable");
         assert_eq!(rank.size_lots, -1_000);
         assert!(
             rank.unrealized_pnl > 0,
@@ -1864,7 +1908,7 @@ fn adl_partially_reduces_a_profitable_opposite_account() {
         // Bob is only the keeper; he has no position at all.
         assert_ok!(Liquidation::adl(
             RuntimeOrigin::signed(BOB),
-            CHARLIE,
+             CHARLIE, 0,
             BoundedVec::truncate_from(vec![ALICE])
         ));
 
@@ -1879,7 +1923,7 @@ fn adl_partially_reduces_a_profitable_opposite_account() {
 
         // §8.5.1 §2: ADL reduces exposure; it does not reduce the residual loss.
         assert_eq!(
-            crate::ResidualLossOf::<Test>::get(CHARLIE).amount,
+            crate::ResidualLossOf::<Test>::get((CHARLIE, 0)).amount,
             loss.amount
         );
     });
@@ -1962,7 +2006,7 @@ fn liquidation_never_credits_more_than_the_account_paid() {
         let fund_before = Insurance::available();
         let keeper_before = crate::KeeperRebateOf::<Test>::get(ALICE);
         assert!(
-            ExchangeCore::liquidate_account(&ALICE, &CHARLIE, MARKET, 0).expect("liquidatable") > 0
+            ExchangeCore::liquidate_account(&ALICE, &CHARLIE,  0, MARKET, 0).expect("liquidatable") > 0
         );
 
         // Whatever left custody for the fund and the keeper must have been paid by Charlie.
@@ -1989,7 +2033,7 @@ fn a_keeper_can_only_claim_their_own_rebate() {
         underwater_long();
         // ALICE does the work; BOB does nothing.
         assert!(
-            ExchangeCore::liquidate_account(&ALICE, &CHARLIE, MARKET, 0).expect("liquidatable") > 0
+            ExchangeCore::liquidate_account(&ALICE, &CHARLIE,  0, MARKET, 0).expect("liquidatable") > 0
         );
         let accrued = crate::KeeperRebateOf::<Test>::get(ALICE);
         assert!(accrued > 0, "the keeper who liquidated must be credited");
@@ -2020,18 +2064,18 @@ fn adl_is_charged_against_the_block_budget() {
             fund(who, 3_100_000);
             assert_ok!(ExchangeCore::deposit_collateral(
                 RuntimeOrigin::signed(who),
-                3_100_000
+                 0, 3_100_000
             ));
         }
 
         // One trade creates both sides: Alice sells 1_000 @ 60_000, Charlie buys it.
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(ALICE),
-            gtc(1, Side::Sell, 60_000, 1_000)
+             0, gtc(1, Side::Sell, 60_000, 1_000)
         ));
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(CHARLIE),
-            gtc(1, Side::Buy, 60_000, 1_000)
+             0, gtc(1, Side::Buy, 60_000, 1_000)
         ));
 
         // Mark down to 57_000: Alice is deep in profit, Charlie deeply underwater.
@@ -2043,14 +2087,14 @@ fn adl_is_charged_against_the_block_budget() {
         Markets::<Test>::insert(MARKET, market);
 
         // Charlie's liquidation leaves an explicitly recorded residual loss.
-        assert_ok!(ExchangeCore::liquidate_account(&ALICE, &CHARLIE, MARKET, 0));
-        let loss = crate::ResidualLossOf::<Test>::get(CHARLIE);
+        assert_ok!(ExchangeCore::liquidate_account(&ALICE, &CHARLIE,  0, MARKET, 0));
+        let loss = crate::ResidualLossOf::<Test>::get((CHARLIE, 0));
         assert!(loss.amount > 0, "the uncovered loss must be recorded");
         assert_eq!(loss.market_id, MARKET);
         assert_eq!(loss.side_sign, 1, "Charlie was long");
 
         // Alice is short, profitable and clears the roe floor — a legitimate target.
-        let rank = ExchangeCore::adl_rank(&ALICE, MARKET).expect("must be rankable");
+        let rank = ExchangeCore::adl_rank(&ALICE,  0, MARKET).expect("must be rankable");
         assert_eq!(rank.size_lots, -1_000);
         assert!(
             rank.unrealized_pnl > 0,
@@ -2066,7 +2110,7 @@ fn adl_is_charged_against_the_block_budget() {
         let actions_before = BlockExchangeUsage::<Test>::get().unwrap().1;
         assert_ok!(Liquidation::adl(
             RuntimeOrigin::signed(BOB),
-            CHARLIE,
+             CHARLIE, 0,
             BoundedVec::truncate_from(vec![ALICE])
         ));
         assert!(
@@ -2282,7 +2326,7 @@ fn a_batch_action_is_authorised_by_its_own_signature() {
         setup_traders();
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(CHARLIE),
-            gtc(1, Side::Sell, 60_000, 100)
+             0, gtc(1, Side::Sell, 60_000, 100)
         ));
 
         // BOB submits; the action is ALICE's.
@@ -2389,7 +2433,7 @@ fn a_half_failed_action_leaves_no_half_applied_state() {
         // ALICE rests a sell the batch action will fill.
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(ALICE),
-            gtc(9, Side::Sell, 60_000, 100)
+             0, gtc(9, Side::Sell, 60_000, 100)
         ));
         let (_, maker_order_id) =
             UserOrderByClientId::<Test>::get((ALICE, DEFAULT_SUBACCOUNT, 9)).unwrap();
@@ -2403,7 +2447,7 @@ fn a_half_failed_action_leaves_no_half_applied_state() {
         for id in 1..=16u64 {
             assert_ok!(ExchangeCore::place_order(
                 RuntimeOrigin::signed(BOB),
-                gtc(id, Side::Buy, 50_000, 1)
+                 0, gtc(id, Side::Buy, 50_000, 1)
             ));
         }
 
@@ -2459,12 +2503,12 @@ fn a_failed_action_does_not_contaminate_the_next_one() {
         setup_traders();
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(CHARLIE),
-            gtc(1, Side::Sell, 60_000, 100)
+             0, gtc(1, Side::Sell, 60_000, 100)
         ));
         for id in 1..=16u64 {
             assert_ok!(ExchangeCore::place_order(
                 RuntimeOrigin::signed(BOB),
-                gtc(id, Side::Buy, 50_000, 1)
+                 0, gtc(id, Side::Buy, 50_000, 1)
             ));
         }
 
@@ -2529,7 +2573,7 @@ fn a_matching_batch_reports_more_than_a_resting_one() {
         setup_traders();
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(CHARLIE),
-            gtc(1, Side::Sell, 60_000, 100)
+             0, gtc(1, Side::Sell, 60_000, 100)
         ));
 
         let reported = |action| {
@@ -2594,13 +2638,13 @@ fn every_action_leaves_a_receipt() {
         // A resting sell for the applied action to take.
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(CHARLIE),
-            gtc(1, Side::Sell, 60_000, 100)
+             0, gtc(1, Side::Sell, 60_000, 100)
         ));
         // No room for another resting order, so BOB's action fills and is then rejected.
         for id in 1..=16u64 {
             assert_ok!(ExchangeCore::place_order(
                 RuntimeOrigin::signed(BOB),
-                gtc(id, Side::Buy, 50_000, 1)
+                 0, gtc(id, Side::Buy, 50_000, 1)
             ));
         }
         // Expired: refused before the nonce is touched.
@@ -2685,7 +2729,7 @@ fn the_receipt_ring_is_bounded() {
 /// `CancelUpTo` used to read the default account and write the signed one. Until S3-1
 /// threads `subaccount` through the whole state machine, refusing is the honest answer.
 #[test]
-fn a_non_zero_subaccount_is_refused() {
+fn a_non_zero_subaccount_is_supported() {
     new_test_ext().execute_with(|| {
         setup_traders();
         let signed = |subaccount, action| {
@@ -2701,25 +2745,43 @@ fn a_non_zero_subaccount_is_refused() {
             signed
         };
 
-        // The pool must refuse it too, or it would queue an action the chain then drops.
-        assert_eq!(
-            ExchangeCore::validate_signed_action(&signed(7, ExchangeAction::CancelUpTo(5))),
-            Err(Error::<Test>::SubaccountUnsupported.into())
+        // S3-1: a non-zero sub-account is now accepted (the S0-1 refusal is gone) and gets
+        // registered so the liquidation pallet can enumerate it.
+        assert_ok!(ExchangeCore::validate_signed_action(&signed(
+            7,
+            ExchangeAction::CancelUpTo(5)
+        )));
+        assert!(
+            crate::SubaccountIndex::<Test>::get(ALICE).contains(&7),
+            "using a sub-account registers it for enumeration"
         );
 
+        // The cap is enforced: an id at or beyond MaxSubaccountsPerAccount (16) is refused, and
+        // is *not* registered.
+        assert_eq!(
+            ExchangeCore::validate_signed_action(&signed(16, ExchangeAction::CancelUpTo(5))),
+            Err(Error::<Test>::SubaccountLimitExceeded.into())
+        );
+        assert!(!crate::SubaccountIndex::<Test>::get(ALICE).contains(&16));
+
+        // Executing under sub-account 7 consumes *that* nonce and writes *that* account; the
+        // default sub-account (0) — where `setup_traders` put the real collateral — is untouched.
         assert_ok!(ExchangeCore::execute_exchange_batch(
             RuntimeOrigin::none(),
-            BoundedVec::truncate_from(vec![
-                signed(7, ExchangeAction::Place(gtc(9, Side::Buy, 60_000, 1))),
-                signed(7, ExchangeAction::CancelUpTo(5)),
-            ])
+            BoundedVec::truncate_from(vec![signed(7, ExchangeAction::CancelUpTo(5))])
         ));
 
-        // Nothing landed: no nonce consumed, and no account written under sub-account 7 —
-        // which is exactly the key the old `CancelUpTo` wrote to.
-        assert_eq!(crate::ActionNonce::<Test>::get(ALICE, 7), 0);
-        assert!(Accounts::<Test>::get(ALICE, 7).is_none());
-        assert!(crate::UserOrderByClientId::<Test>::get((ALICE, DEFAULT_SUBACCOUNT, 9)).is_none());
+        assert_eq!(crate::ActionNonce::<Test>::get(ALICE, 7), 1, "sub-7 nonce advanced");
+        assert_eq!(
+            crate::ActionNonce::<Test>::get(ALICE, DEFAULT_SUBACCOUNT),
+            0,
+            "default nonce is untouched by a sub-7 action"
+        );
+        assert!(Accounts::<Test>::get(ALICE, 7).is_some(), "sub-7 account was written");
+        assert!(
+            Accounts::<Test>::get(ALICE, DEFAULT_SUBACCOUNT).is_some(),
+            "default account is intact"
+        );
     });
 }
 
@@ -2839,7 +2901,7 @@ fn reordering_the_batch_does_not_reorder_the_trades() {
                 // Only 100 lots of liquidity, so exactly one of the two buys can fill.
                 assert_ok!(ExchangeCore::place_order(
                     RuntimeOrigin::signed(BOB),
-                    gtc(1, Side::Sell, 60_000, 100)
+                     0, gtc(1, Side::Sell, 60_000, 100)
                 ));
                 assert_ok!(ExchangeCore::execute_exchange_batch(
                     RuntimeOrigin::none(),
@@ -2887,13 +2949,13 @@ fn custody_stays_conserved_under_mark_price_shocks() {
         fund(ALICE, 1_100_000_000);
         assert_ok!(ExchangeCore::deposit_collateral(
             RuntimeOrigin::signed(ALICE),
-            1_000_000_000
+             0, 1_000_000_000
         ));
         for who in [BOB, CHARLIE] {
             fund(who, 3_100_000);
             assert_ok!(ExchangeCore::deposit_collateral(
                 RuntimeOrigin::signed(who),
-                3_100_000
+                 0, 3_100_000
             ));
         }
 
@@ -2901,11 +2963,11 @@ fn custody_stays_conserved_under_mark_price_shocks() {
         // enough to go under maintenance.
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(BOB),
-            gtc(1, Side::Sell, 60_000, 1_000)
+             0, gtc(1, Side::Sell, 60_000, 1_000)
         ));
         assert_ok!(ExchangeCore::place_order(
             RuntimeOrigin::signed(CHARLIE),
-            gtc(1, Side::Buy, 60_000, 1_000)
+             0, gtc(1, Side::Buy, 60_000, 1_000)
         ));
         assert_ok!(Insurance::deposit(RuntimeOrigin::signed(ALICE), 50_000_000));
 
@@ -2928,10 +2990,10 @@ fn custody_stays_conserved_under_mark_price_shocks() {
             // Something for the liquidation to trade into.
             assert_ok!(ExchangeCore::place_order(
                 RuntimeOrigin::signed(ALICE),
-                gtc(id, Side::Buy, mark, 1_000)
+                 0, gtc(id, Side::Buy, mark, 1_000)
             ));
             id += 1;
-            let _ = ExchangeCore::liquidate_account(&ALICE, &CHARLIE, MARKET, 0);
+            let _ = ExchangeCore::liquidate_account(&ALICE, &CHARLIE,  0, MARKET, 0);
             check("after crushing the long");
         }
 
@@ -2940,10 +3002,10 @@ fn custody_stays_conserved_under_mark_price_shocks() {
             TestOracle::set(MARKET, mark);
             assert_ok!(ExchangeCore::place_order(
                 RuntimeOrigin::signed(ALICE),
-                gtc(id, Side::Sell, mark, 1_000)
+                 0, gtc(id, Side::Sell, mark, 1_000)
             ));
             id += 1;
-            let _ = ExchangeCore::liquidate_account(&ALICE, &BOB, MARKET, 0);
+            let _ = ExchangeCore::liquidate_account(&ALICE, &BOB,  0, MARKET, 0);
             check("after crushing the short");
         }
     });

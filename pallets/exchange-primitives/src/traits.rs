@@ -10,6 +10,7 @@
 //! ```
 
 use crate::types::{PriceTicks, SignedQuote};
+use sp_std::vec::Vec;
 use codec::{Decode, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 use sp_runtime::DispatchResult;
@@ -131,6 +132,7 @@ pub trait ExchangeEngine<AccountId> {
 	fn liquidate_account(
 		keeper: &AccountId,
 		who: &AccountId,
+		subaccount: crate::types::SubaccountId,
 		market: crate::types::MarketId,
 		lots: crate::types::Lots,
 	)
@@ -139,6 +141,7 @@ pub trait ExchangeEngine<AccountId> {
 	/// Offsets a bankrupt account's position against the opposite side at `price`.
 	fn adl_close(
 		who: &AccountId,
+		subaccount: crate::types::SubaccountId,
 		market: crate::types::MarketId,
 		lots: crate::types::Lots,
 		price: PriceTicks,
@@ -149,18 +152,30 @@ pub trait ExchangeEngine<AccountId> {
 	/// keeper can never be paid out of user collateral.
 	fn pay_keeper(keeper: &AccountId) -> Result<crate::types::QuoteAmount, sp_runtime::DispatchError>;
 
-	/// Read-only ranking of `who` as an ADL candidate. `None` when the account has no position
-	/// in that market.
-	fn adl_rank(who: &AccountId, market: crate::types::MarketId) -> Option<AdlRank>;
+	/// The sub-accounts `who` has used, for the liquidation pallet to enumerate when it must
+	/// touch every sub-account (S3-1). Always includes the default sub-account.
+	fn subaccounts(who: &AccountId) -> Vec<crate::types::SubaccountId>;
 
-	/// Explicitly recorded residual loss attributed to `who` (§8.5.1 §2). `amount == 0` means
-	/// there is nothing for ADL to respond to.
-	fn residual_loss_of(who: &AccountId) -> ResidualLoss;
+	/// Read-only ranking of `who`'s `subaccount` as an ADL candidate. `None` when that
+	/// sub-account has no position in the market.
+	fn adl_rank(
+		who: &AccountId,
+		subaccount: crate::types::SubaccountId,
+		market: crate::types::MarketId,
+	) -> Option<AdlRank>;
+
+	/// Explicitly recorded residual loss attributed to `who`'s `subaccount` (§8.5.1 §2).
+	/// `amount == 0` means there is nothing for ADL to respond to.
+	fn residual_loss_of(who: &AccountId, subaccount: crate::types::SubaccountId) -> ResidualLoss;
 
 	/// Records `notional` of exposure that ADL has shed against a residual loss.
 	///
 	/// ADL is meant to remove exposure worth the uncovered loss — no more, and exactly once.
 	/// The loss itself is left alone (§8.5.1 §2); only the remaining budget shrinks, so a
 	/// single loss event cannot license ADL forever.
-	fn note_adl_shed(who: &AccountId, notional: crate::types::QuoteAmount);
+	fn note_adl_shed(
+		who: &AccountId,
+		subaccount: crate::types::SubaccountId,
+		notional: crate::types::QuoteAmount,
+	);
 }

@@ -92,3 +92,76 @@ fn migration_v1_upgrades_old_positions_under_the_real_runtime() {
 		assert_eq!(bob_pos.realized_pnl, -1_250);
 	});
 }
+
+/// v3 -> v4: `Order` gained a `subaccount` field (S3-1), which shifts the SCALE layout by 4
+/// bytes. A pre-S3-1 order no longer decodes as the current `Order`; `Orders::iter()` would
+/// silently skip it, leaving garbage in storage forever. This test drives the real v4 migration
+/// against the real runtime: a current order survives, a legacy one is dropped.
+#[test]
+fn migration_v4_drops_pre_s3_1_orders_that_no_longer_decode() {
+	const MARKET: u32 = 0;
+	let alice = sunchain_runtime::AccountId::from([1u8; 32]);
+
+	let current = pallet_exchange_core::Order::<
+		sunchain_runtime::AccountId,
+		sunchain_runtime::BlockNumber,
+	> {
+		owner: alice.clone(),
+		subaccount: DEFAULT_SUBACCOUNT,
+		market_id: MARKET,
+		client_order_id: 1,
+		side: pallet_exchange_core::Side::Buy,
+		price_ticks: 60_000,
+		original_lots: 100,
+		remaining_lots: 100,
+		reserved_margin: 1_000,
+		tif: pallet_exchange_core::TimeInForce::GoodTilCancelled,
+		post_only: false,
+		reduce_only: false,
+		placed_at: 1,
+		expires_at: 0,
+		prev_order: None,
+		next_order: None,
+	};
+	let current_bytes = current.encode();
+
+	// The pre-S3-1 layout is the same order *without* `subaccount`. With a 32-byte owner the
+	// field is the 4 bytes immediately after it, so slicing them out reconstructs a legacy
+	// encoding exactly — one that fails to decode as the current `Order`, which is precisely
+	// what makes the migration drop it.
+	assert_eq!(&current_bytes[32..36], &DEFAULT_SUBACCOUNT.encode()[..]);
+	let mut legacy_bytes = current_bytes[..32].to_vec();
+	legacy_bytes.extend_from_slice(&current_bytes[36..]);
+
+	let keep_key = pallet_exchange_core::Orders::<Runtime>::hashed_key_for(MARKET, 1u64);
+	let drop_key = pallet_exchange_core::Orders::<Runtime>::hashed_key_for(MARKET, 2u64);
+
+	let storage = Storage {
+		top: vec![(keep_key, current_bytes), (drop_key, legacy_bytes)]
+			.into_iter()
+			.collect(),
+		children_default: Default::default(),
+	};
+
+	TestExternalities::new(storage).execute_with(|| {
+		type Migration = pallet_exchange_core::migrations::v4::Migration<Runtime>;
+
+		#[cfg(feature = "try-runtime")]
+		{
+			let state_before = Migration::pre_upgrade().expect("pre_upgrade");
+			Migration::on_runtime_upgrade();
+			Migration::post_upgrade(state_before).expect("post_upgrade");
+		}
+		#[cfg(not(feature = "try-runtime"))]
+		Migration::on_runtime_upgrade();
+
+		assert!(
+			pallet_exchange_core::Orders::<Runtime>::get(MARKET, 1u64).is_some(),
+			"a current order survives the migration"
+		);
+		assert!(
+			pallet_exchange_core::Orders::<Runtime>::get(MARKET, 2u64).is_none(),
+			"a legacy order that no longer decodes is dropped"
+		);
+	});
+}

@@ -133,7 +133,7 @@ fn fund_with<T: Config>(who: &T::AccountId, amount: QuoteAmount) -> Result<(), B
     let balance = to_balance::<T>(amount)?;
     let _ = T::Assets::mint_into(T::CollateralAssetId::get(), who, balance)
         .map_err(|_| BenchmarkError::Stop("mint"))?;
-    Pallet::<T>::deposit_collateral(RawOrigin::Signed(who.clone()).into(), amount)
+    Pallet::<T>::deposit_collateral(RawOrigin::Signed(who.clone()).into(), 0, amount)
         .map_err(|_| BenchmarkError::Stop("deposit"))?;
     Ok(())
 }
@@ -190,7 +190,7 @@ mod benchmarks {
         let _ = T::Assets::mint_into(T::CollateralAssetId::get(), &caller, amount).unwrap();
 
         #[extrinsic_call]
-        deposit_collateral(RawOrigin::Signed(caller), DEPOSIT);
+        deposit_collateral(RawOrigin::Signed(caller), 0, DEPOSIT);
     }
 
     #[benchmark]
@@ -200,7 +200,7 @@ mod benchmarks {
         fund::<T>(&caller).unwrap();
 
         #[extrinsic_call]
-        withdraw_collateral(RawOrigin::Signed(caller), 1u128);
+        withdraw_collateral(RawOrigin::Signed(caller), 0, 1u128);
     }
 
     /// Taker rests at a brand new price level after walking `l` existing levels of the chain.
@@ -226,7 +226,7 @@ mod benchmarks {
         let request = resting_request::<T>(1, Side::Buy, 50_000, 10);
 
         #[extrinsic_call]
-        place_order(RawOrigin::Signed(caller), request);
+        place_order(RawOrigin::Signed(caller), 0, request);
     }
 
     /// Taker sweeps `s` stale (invalidated) resting maker orders out of the book.
@@ -249,12 +249,12 @@ mod benchmarks {
         }
         // Logically invalidate every maker order: they stay in the book until a taker sweeps
         // them, which is exactly the stale-removal path of the matching loop.
-        Pallet::<T>::cancel_up_to(RawOrigin::Signed(maker).into(), s as ClientOrderId + 1).unwrap();
+        Pallet::<T>::cancel_up_to(RawOrigin::Signed(maker).into(), 0, s as ClientOrderId + 1).unwrap();
 
         let request = resting_request::<T>(1, Side::Buy, 60_000, 10u64 * s as u64 + 10);
 
         #[extrinsic_call]
-        place_order(RawOrigin::Signed(caller), request);
+        place_order(RawOrigin::Signed(caller), 0, request);
     }
 
     #[benchmark]
@@ -265,14 +265,14 @@ mod benchmarks {
         setup_account::<T>(&maker, DEPOSIT);
         setup_account::<T>(&caller, DEPOSIT);
         Pallet::<T>::place_order(
-            RawOrigin::Signed(maker).into(),
+            RawOrigin::Signed(maker).into(), 0,
             resting_request::<T>(1, Side::Sell, 61_000, 100),
         )
         .unwrap();
         let request = resting_request::<T>(1, Side::Sell, 61_000, 100);
 
         #[extrinsic_call]
-        place_order(RawOrigin::Signed(caller), request);
+        place_order(RawOrigin::Signed(caller), 0, request);
     }
 
     /// Taker sweeping `m` resting maker orders.
@@ -286,7 +286,7 @@ mod benchmarks {
             let maker: T::AccountId = account("maker", i, 0);
             setup_account::<T>(&maker, DEPOSIT);
             Pallet::<T>::place_order(
-                RawOrigin::Signed(maker).into(),
+                RawOrigin::Signed(maker).into(), 0,
                 resting_request::<T>(1, Side::Sell, 60_000, 10),
             )
             .unwrap();
@@ -294,7 +294,7 @@ mod benchmarks {
         let request = resting_request::<T>(1, Side::Buy, 60_000, 10u64 * m as u64);
 
         #[extrinsic_call]
-        place_order(RawOrigin::Signed(caller), request);
+        place_order(RawOrigin::Signed(caller), 0, request);
     }
 
     /// Liquidating an underwater account into `m` resting maker orders (§8.3, book path).
@@ -313,7 +313,7 @@ mod benchmarks {
             let maker: T::AccountId = account("maker", i, 0);
             setup_account::<T>(&maker, DEPOSIT);
             Pallet::<T>::place_order(
-                RawOrigin::Signed(maker).into(),
+                RawOrigin::Signed(maker).into(), 0,
                 resting_request::<T>(1, Side::Buy, 57_000, 10),
             )
             .unwrap();
@@ -323,7 +323,7 @@ mod benchmarks {
         let seller: T::AccountId = account("seller", 0, 0);
         setup_account::<T>(&seller, DEPOSIT);
         Pallet::<T>::place_order(
-            RawOrigin::Signed(seller).into(),
+            RawOrigin::Signed(seller).into(), 0,
             resting_request::<T>(1, Side::Sell, 60_000, qty),
         )
         .unwrap();
@@ -363,7 +363,7 @@ mod benchmarks {
         setup_account::<T>(&seller, DEPOSIT);
         setup_account::<T>(&caller, DEPOSIT);
         Pallet::<T>::place_order(
-            RawOrigin::Signed(seller).into(),
+            RawOrigin::Signed(seller).into(), 0,
             resting_request::<T>(1, Side::Sell, 60_000, 1_000),
         )
         .unwrap();
@@ -398,7 +398,7 @@ mod benchmarks {
         .unwrap();
 
         #[extrinsic_call]
-        cancel_order(RawOrigin::Signed(caller), 1);
+        cancel_order(RawOrigin::Signed(caller), 0, 1);
     }
 
     #[benchmark]
@@ -408,7 +408,7 @@ mod benchmarks {
         setup_account::<T>(&caller, DEPOSIT);
 
         #[extrinsic_call]
-        cancel_up_to(RawOrigin::Signed(caller), 100);
+        cancel_up_to(RawOrigin::Signed(caller), 0, 100);
     }
 
     #[benchmark]
@@ -429,7 +429,7 @@ mod benchmarks {
         let actions: BoundedVec<_, T::MaxActionsPerBatch> = BoundedVec::truncate_from(actions);
 
         #[extrinsic_call]
-        execute_batch(RawOrigin::Signed(caller), actions);
+        execute_batch(RawOrigin::Signed(caller), 0, actions);
     }
 
     /// The same batch, but every action *matches*: a resting sell is on the book first, so the
@@ -445,7 +445,7 @@ mod benchmarks {
         setup_account::<T>(&caller, DEPOSIT);
         // Deep enough that every action in the batch can fill.
         Pallet::<T>::place_order(
-            RawOrigin::Signed(maker).into(),
+            RawOrigin::Signed(maker).into(), 0,
             resting_request::<T>(1, Side::Sell, 50_000, (a as Lots).saturating_mul(10)),
         )
         .expect("the resting sell must place");
@@ -462,7 +462,7 @@ mod benchmarks {
         let actions: BoundedVec<_, T::MaxActionsPerBatch> = BoundedVec::truncate_from(actions);
 
         #[extrinsic_call]
-        execute_batch(RawOrigin::Signed(caller), actions);
+        execute_batch(RawOrigin::Signed(caller), 0, actions);
     }
 
     /// `set_liquidity_tier` (S1-4): a flat call that iterates every market on the tier.

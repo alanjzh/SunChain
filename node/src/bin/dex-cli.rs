@@ -134,7 +134,10 @@ fn main() {
 		"deposit" => {
 			let (pair, who) = trader.expect("--key is required to deposit");
 			let amount: u128 = flag(&args, "--amount", "1000000000").parse().expect("amount");
-			let call = RuntimeCall::ExchangeCore(CoreCall::deposit_collateral { amount });
+			let call = RuntimeCall::ExchangeCore(CoreCall::deposit_collateral {
+				subaccount: 0,
+				amount,
+			});
 			// Read the nonce rather than assuming 0: a hardcoded one works exactly once, and
 			// every later failure looks like the transaction being rejected rather than like
 			// a stale nonce in this file.

@@ -406,6 +406,9 @@ pub struct PartyState {
 #[scale_info(skip_type_params(AccountId, BlockNumber))]
 pub struct Order<AccountId, BlockNumber> {
     pub owner: AccountId,
+    /// The sub-account this order belongs to. Carried on the order so matching can attribute
+    /// margin, position and PnL to the correct sub-account without a second lookup (S3-1).
+    pub subaccount: SubaccountId,
     pub market_id: MarketId,
     pub client_order_id: ClientOrderId,
     pub side: Side,

@@ -7,11 +7,10 @@
 use crate::{
     types::{
         Lots, Market, MarketId, Order, OrderId, PartyState, PriceLevel, PriceTicks, QuoteAmount,
-        Side,
+        Side, SubaccountId,
     },
     Accounts, Config, Error, Orders, Pallet, PriceLevels, UserOrderByClientId,
 };
-use exchange_primitives::DEFAULT_SUBACCOUNT;
 use frame_support::{ensure, traits::Get};
 use frame_system::pallet_prelude::BlockNumberFor;
 use sp_runtime::{traits::Saturating, DispatchError};
@@ -245,7 +244,7 @@ impl<T: Config> Pallet<T> {
             .ok_or(Error::<T>::InvariantViolation)?;
 
         Orders::<T>::remove(market_id, order_id);
-        UserOrderByClientId::<T>::remove((&order.owner, DEFAULT_SUBACCOUNT, order.client_order_id));
+        UserOrderByClientId::<T>::remove((&order.owner, order.subaccount, order.client_order_id));
 
         if level.order_count == 0 {
             Self::remove_level(market, market_id, side, price)?;
@@ -253,12 +252,19 @@ impl<T: Config> Pallet<T> {
             PriceLevels::<T>::insert((market_id, side, price), level);
         }
 
-        Self::release_order_reserve(&order.owner, order.reserved_margin, taker_in_memory)
+        Self::release_order_reserve(
+            &order.owner,
+            order.subaccount,
+            order.reserved_margin,
+            taker_in_memory,
+        )
     }
 
-    /// Credits `amount` of reserved margin back to `owner`, and decrements its open order count.
+    /// Credits `amount` of reserved margin back to `owner`'s `sub` account, and decrements its
+    /// open order count.
     pub(crate) fn release_order_reserve(
         owner: &T::AccountId,
+        sub: SubaccountId,
         amount: QuoteAmount,
         taker_in_memory: Option<(&T::AccountId, &mut PartyState)>,
     ) -> Result<QuoteAmount, DispatchError> {
@@ -278,7 +284,7 @@ impl<T: Config> Pallet<T> {
             _ => {
                 Accounts::<T>::try_mutate(
                     owner,
-                    DEFAULT_SUBACCOUNT,
+                    sub,
                     |maybe| -> Result<(), DispatchError> {
                         let account = maybe.as_mut().ok_or(Error::<T>::InvariantViolation)?;
                         account.reserved_open_order_margin = account

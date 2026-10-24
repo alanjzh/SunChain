@@ -22115,6 +22115,7 @@ dependencies = [
  "sp-transaction-storage-proof",
  "substrate-build-script-utils",
  "substrate-frame-rpc-system",
+ "substrate-prometheus-endpoint",
  "substrate-state-trie-migration-rpc",
  "sunchain-node-inspect",
  "sunchain-runtime",

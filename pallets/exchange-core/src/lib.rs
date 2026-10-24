@@ -89,7 +89,7 @@ pub mod pallet {
     /// Phase 1 never declared one, so any chain carrying Phase 1 state is at version `0`.
     /// The P2-B layout (`Position::funding_index`, settled `collateral`, `BadDebt`) is `1`;
     /// see [`migrations`].
-    const STORAGE_VERSION: StorageVersion = StorageVersion::new(3);
+    const STORAGE_VERSION: StorageVersion = StorageVersion::new(4);
 
     #[pallet::pallet]
     #[pallet::storage_version(STORAGE_VERSION)]
@@ -377,7 +377,7 @@ pub mod pallet {
     pub type ResidualLossOf<T> = StorageMap<
         _,
         Blake2_128Concat,
-        <T as frame_system::Config>::AccountId,
+        (<T as frame_system::Config>::AccountId, SubaccountId),
         ResidualLoss,
         ValueQuery,
     >;
@@ -664,16 +664,16 @@ pub mod pallet {
         ActionExpired,
         /// The signature's `expires_at` is further out than `MaxOrderLifetime`.
         InvalidActionExpiry,
-        /// Sub-accounts are not supported yet.
+        /// Retained only so previously-encoded errors still decode.
         ///
-        /// The nonce is keyed by `(account, subaccount)`, but orders, positions and
-        /// collateral are not: every trading path reads and writes `DEFAULT_SUBACCOUNT`
-        /// (`do_place_order`, `do_cancel_order`, `account_of`, `position_of`). A non-zero
-        /// sub-account would therefore be authorised against one key and applied to
-        /// another — `CancelUpTo` even reads the default account and writes the signed
-        /// one. Refusing is the only honest answer until the whole state machine carries
-        /// `subaccount` (see `docs/Sunchain-DEX-Remediation-Plan.md`, S0-1 / S3-1).
+        /// S0-1 refused any non-default sub-account here: the nonce was keyed by
+        /// `(account, subaccount)` but the trading state machine read and wrote
+        /// `DEFAULT_SUBACCOUNT` only, so a non-zero value would authorise one key and apply
+        /// another. S3-1 threads `subaccount` through every path, so this is no longer
+        /// constructed — see `docs/Sunchain-DEX-Remediation-Plan.md` (S0-1 / S3-1).
         SubaccountUnsupported,
+        /// The sub-account id is at or beyond `MaxSubaccountsPerAccount` (S3-1).
+        SubaccountLimitExceeded,
     }
 
 
@@ -783,9 +783,14 @@ pub mod pallet {
         /// Moves test USDC into the exchange custody account and credits the internal ledger.
         #[pallet::call_index(0)]
         #[pallet::weight(T::WeightInfo::deposit_collateral())]
-        pub fn deposit_collateral(origin: OriginFor<T>, amount: QuoteAmount) -> DispatchResult {
+        pub fn deposit_collateral(
+            origin: OriginFor<T>,
+            subaccount: SubaccountId,
+            amount: QuoteAmount,
+        ) -> DispatchResult {
             let who = ensure_signed(origin)?;
             ensure!(amount > 0, Error::<T>::InvalidAmount);
+            Self::ensure_subaccount(who.clone(), subaccount)?;
             Self::consume_block_budget(T::WeightInfo::deposit_collateral())?;
 
             let asset = T::CollateralAssetId::get();
@@ -794,7 +799,7 @@ pub mod pallet {
             T::Assets::transfer(asset, &who, &custody, balance, Preservation::Expendable)
                 .map_err(|_| Error::<T>::AssetTransferFailed)?;
 
-            Accounts::<T>::try_mutate(&who, DEFAULT_SUBACCOUNT, |maybe| -> DispatchResult {
+            Accounts::<T>::try_mutate(&who, subaccount, |maybe| -> DispatchResult {
                 let account = maybe.get_or_insert_with(Account::default);
                 account.collateral = account
                     .collateral
@@ -810,12 +815,17 @@ pub mod pallet {
         /// Withdraws free collateral after re-checking the initial margin requirement.
         #[pallet::call_index(1)]
         #[pallet::weight(T::WeightInfo::withdraw_collateral())]
-        pub fn withdraw_collateral(origin: OriginFor<T>, amount: QuoteAmount) -> DispatchResult {
+        pub fn withdraw_collateral(
+            origin: OriginFor<T>,
+            subaccount: SubaccountId,
+            amount: QuoteAmount,
+        ) -> DispatchResult {
             let who = ensure_signed(origin)?;
             ensure!(amount > 0, Error::<T>::InvalidAmount);
+            Self::ensure_subaccount(who.clone(), subaccount)?;
             Self::consume_block_budget(T::WeightInfo::withdraw_collateral())?;
 
-            let mut account = Self::account_of(&who);
+            let mut account = Self::account_of(&who, subaccount);
             ensure!(
                 !matches!(account.status, AccountStatus::Restricted),
                 Error::<T>::AccountRestricted
@@ -825,7 +835,7 @@ pub mod pallet {
             // accrued funding, or withdraw cash its realised losses have already consumed.
             if let Some(market_id) = PrimaryMarketId::<T>::get() {
                 if let Some(market) = Markets::<T>::get(market_id) {
-                    let position = Self::position_of(&who, market_id);
+                    let position = Self::position_of(&who, subaccount, market_id);
                     // Only touch storage when there is actually something to settle; otherwise
                     // every withdrawal would create a position entry for non-traders.
                     let dirty = !position.is_flat()
@@ -835,12 +845,13 @@ pub mod pallet {
                         let mut position = position;
                         Self::settle_party(
                             &who,
+                            subaccount,
                             market_id,
                             &mut account,
                             &mut position,
                             market.funding_index,
                         )?;
-                        Positions::<T>::insert((&who, DEFAULT_SUBACCOUNT, market_id), position);
+                        Positions::<T>::insert((&who, subaccount, market_id), position);
                     }
                 }
             }
@@ -855,7 +866,7 @@ pub mod pallet {
                 let market_id = PrimaryMarketId::<T>::get().ok_or(Error::<T>::MarketNotFound)?;
                 let market = Markets::<T>::get(market_id).ok_or(Error::<T>::MarketNotFound)?;
                 let mark = Self::mark_price_of(market_id, &market)?;
-                let position = Self::position_of(&who, market_id);
+                let position = Self::position_of(&who, subaccount, market_id);
                 let params = Self::params_of(&market, mark);
                 let mut after = account.clone();
                 after.collateral = after
@@ -868,7 +879,7 @@ pub mod pallet {
                     Error::<T>::InsufficientCollateral
                 );
             } else if let Some(market_id) = PrimaryMarketId::<T>::get() {
-                let position = Self::position_of(&who, market_id);
+                let position = Self::position_of(&who, subaccount, market_id);
                 if !position.is_flat() {
                     let market = Markets::<T>::get(market_id).ok_or(Error::<T>::MarketNotFound)?;
                     let mark = Self::mark_price_of(market_id, &market)?;
@@ -896,7 +907,7 @@ pub mod pallet {
                 .collateral
                 .checked_sub(amount)
                 .ok_or(Error::<T>::InsufficientCollateral)?;
-            Accounts::<T>::insert(&who, DEFAULT_SUBACCOUNT, account);
+            Accounts::<T>::insert(&who, subaccount, account);
 
             Self::deposit_event(Event::CollateralWithdrawn { who, amount });
             Ok(())
@@ -911,10 +922,12 @@ pub mod pallet {
         ))]
         pub fn place_order(
             origin: OriginFor<T>,
+            subaccount: SubaccountId,
             request: OrderRequest<BlockNumberFor<T>>,
         ) -> DispatchResultWithPostInfo {
             let who = ensure_signed(origin)?;
-            let outcome = Self::do_place_order(&who, request)?;
+            Self::ensure_subaccount(who.clone(), subaccount)?;
+            let outcome = Self::do_place_order(&who, subaccount, request)?;
             let actual = T::WeightInfo::place_order(
                 outcome.matches,
                 outcome.stale_removed,
@@ -935,11 +948,13 @@ pub mod pallet {
         #[pallet::weight(T::WeightInfo::cancel_order())]
         pub fn cancel_order(
             origin: OriginFor<T>,
+            subaccount: SubaccountId,
             client_order_id: ClientOrderId,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
+            Self::ensure_subaccount(who.clone(), subaccount)?;
             Self::consume_block_budget(T::WeightInfo::cancel_order())?;
-            Self::do_cancel_order(&who, client_order_id)
+            Self::do_cancel_order(&who, subaccount, client_order_id)
         }
 
         /// Logically cancels every resting order with `client_order_id < n` in O(1).
@@ -947,14 +962,16 @@ pub mod pallet {
         #[pallet::weight(T::WeightInfo::cancel_up_to())]
         pub fn cancel_up_to(
             origin: OriginFor<T>,
+            subaccount: SubaccountId,
             client_order_id: ClientOrderId,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
+            Self::ensure_subaccount(who.clone(), subaccount)?;
             Self::consume_block_budget(T::WeightInfo::cancel_up_to())?;
-            let mut account = Self::account_of(&who);
+            let mut account = Self::account_of(&who, subaccount);
             if client_order_id > account.invalid_before {
                 account.invalid_before = client_order_id;
-                Accounts::<T>::insert(&who, DEFAULT_SUBACCOUNT, account);
+                Accounts::<T>::insert(&who, subaccount, account);
             }
             Self::deposit_event(Event::OrdersInvalidatedUpTo {
                 who,
@@ -974,9 +991,11 @@ pub mod pallet {
 		))]
         pub fn execute_batch(
             origin: OriginFor<T>,
+            subaccount: SubaccountId,
             actions: BoundedVec<ExchangeAction<BlockNumberFor<T>>, T::MaxActionsPerBatch>,
         ) -> DispatchResultWithPostInfo {
             let who = ensure_signed(origin)?;
+            Self::ensure_subaccount(who.clone(), subaccount)?;
             ensure!(!actions.is_empty(), Error::<T>::TooManyActions);
             ensure!(
                 actions.len() as u32 <= T::MaxActionsPerBatch::get(),
@@ -989,19 +1008,19 @@ pub mod pallet {
             for action in actions.iter() {
                 match action {
                     ExchangeAction::Place(request) => {
-                        let outcome = Self::do_place_order(&who, request.clone())?;
+                        let outcome = Self::do_place_order(&who, subaccount, request.clone())?;
                         total_matches = total_matches.saturating_add(outcome.matches);
                         total_stale = total_stale.saturating_add(outcome.stale_removed);
                         total_scans = total_scans.saturating_add(outcome.level_scans);
                     }
                     ExchangeAction::Cancel(client_order_id) => {
-                        Self::do_cancel_order(&who, *client_order_id)?;
+                        Self::do_cancel_order(&who, subaccount, *client_order_id)?;
                     }
                     ExchangeAction::CancelUpTo(client_order_id) => {
-                        let mut account = Self::account_of(&who);
+                        let mut account = Self::account_of(&who, subaccount);
                         if *client_order_id > account.invalid_before {
                             account.invalid_before = *client_order_id;
-                            Accounts::<T>::insert(&who, DEFAULT_SUBACCOUNT, account);
+                            Accounts::<T>::insert(&who, subaccount, account);
                         }
                         Self::deposit_event(Event::OrdersInvalidatedUpTo {
                             who: who.clone(),
@@ -1164,17 +1183,12 @@ pub mod pallet {
                 // two an action failed at — the difference between "your nonce is still free"
                 // and "your nonce is spent" (S1-5).
                 let validated = (|| -> DispatchResult {
-                    // Sub-accounts are keyed into the nonce but not into the trading state
-                    // machine, so a non-zero value would authorise one key and apply
-                    // another. Refuse it here rather than half-apply it (S0-1).
-                    ensure!(
-                        signed.subaccount == DEFAULT_SUBACCOUNT,
-                        Error::<T>::SubaccountUnsupported
-                    );
                     ensure!(
                         sp_runtime::traits::Verify::verify(&signed.signature, &payload[..], &who,),
                         Error::<T>::InvalidActionSignature
                     );
+                    // S3-1: enforce the sub-account budget and record it for enumeration.
+                    Self::ensure_subaccount(who.clone(), signed.subaccount)?;
                     // Expiry before the nonce, for the same reason (S1-1).
                     Self::ensure_action_fresh(signed.expires_at)?;
                     let last = ActionNonce::<T>::get(&who, signed.subaccount);
@@ -1201,14 +1215,15 @@ pub mod pallet {
                                     let applied: Result<MatchStats, DispatchError> = (|| {
                                         match &signed.action {
                                             ExchangeAction::Place(request) => {
-                                                Self::do_place_order(&who, request.clone())
+                                                Self::do_place_order(&who, signed.subaccount, request.clone())
                                             }
                                             ExchangeAction::Cancel(client_order_id) => {
-                                                Self::do_cancel_order(&who, *client_order_id)?;
+                                                Self::do_cancel_order(&who, signed.subaccount, *client_order_id)?;
                                                 Ok(MatchStats::default())
                                             }
                                             ExchangeAction::CancelUpTo(client_order_id) => {
-                                                let mut account = Self::account_of(&who);
+                                                let mut account =
+                                                    Self::account_of(&who, signed.subaccount);
                                                 if *client_order_id > account.invalid_before {
                                                     account.invalid_before = *client_order_id;
                                                     Accounts::<T>::insert(
@@ -1428,12 +1443,30 @@ pub mod pallet {
             frame_system::Pallet::<T>::block_number()
         }
 
-        pub(crate) fn account_of(who: &T::AccountId) -> Account {
-            Accounts::<T>::get(who, DEFAULT_SUBACCOUNT).unwrap_or_default()
+        pub(crate) fn account_of(who: &T::AccountId, sub: SubaccountId) -> Account {
+            Accounts::<T>::get(who, sub).unwrap_or_default()
         }
 
-        pub(crate) fn position_of(who: &T::AccountId, market_id: MarketId) -> Position {
-            Positions::<T>::get((who, DEFAULT_SUBACCOUNT, market_id)).unwrap_or_default()
+        pub(crate) fn position_of(who: &T::AccountId, sub: SubaccountId, market_id: MarketId) -> Position {
+            Positions::<T>::get((who, sub, market_id)).unwrap_or_default()
+        }
+
+        /// Enforces the sub-account budget and records the sub-account the first time it is used
+        /// so the liquidation pallet can enumerate a account's sub-accounts without an unbounded
+        /// prefix scan (S3-1). A sub-account id must be below `MaxSubaccountsPerAccount`; the
+        /// default sub-account is always allowed and always present.
+        fn ensure_subaccount(who: T::AccountId, sub: SubaccountId) -> DispatchResult {
+            let max = T::MaxSubaccountsPerAccount::get();
+            ensure!(sub < max, Error::<T>::SubaccountLimitExceeded);
+            if sub != DEFAULT_SUBACCOUNT {
+                SubaccountIndex::<T>::mutate(&who, |subs| -> DispatchResult {
+                    if !subs.contains(&sub) {
+                        subs.try_push(sub).map_err(|_| Error::<T>::SubaccountLimitExceeded)?;
+                    }
+                    Ok(())
+                })?;
+            }
+            Ok(())
         }
 
         pub(crate) fn params_of(
@@ -1506,6 +1539,7 @@ pub mod pallet {
         /// cannot be collected is booked to `BadDebt`.
         fn settle_party(
             who: &T::AccountId,
+            sub: SubaccountId,
             market_id: MarketId,
             account: &mut Account,
             position: &mut Position,
@@ -1524,13 +1558,13 @@ pub mod pallet {
                     Ok(()) => {
                         // The fund paid it, so the outstanding record shrinks with it —
                         // otherwise it stays non-zero forever and keeps licensing ADL.
-                        ResidualLossOf::<T>::mutate(who, |loss| {
+                        ResidualLossOf::<T>::mutate((who, sub), |loss| {
                             loss.amount = loss.amount.saturating_sub(unpaid)
                         });
                     }
                     Err(_) => {
                         BadDebt::<T>::mutate(|debt| *debt = debt.saturating_add(unpaid));
-                        ResidualLossOf::<T>::mutate(who, |loss| {
+                        ResidualLossOf::<T>::mutate((who, sub), |loss| {
                             loss.market_id = market_id;
                             // Settlement can run again *after* the position was closed (ADL
                             // folds the realised PnL last), and a flat position has no side.
@@ -1936,6 +1970,7 @@ pub mod pallet {
         /// a restricted account may only cancel orders and post reduce-only IOC orders.
         fn refresh_restriction(
             who: &T::AccountId,
+            sub: SubaccountId,
             account: &mut Account,
             position: &Position,
             market_id: MarketId,
@@ -1943,7 +1978,7 @@ pub mod pallet {
         ) -> Result<(), DispatchError> {
             let (oi, om, _) = Self::math(Self::cross_market_requirements(
                 who,
-                DEFAULT_SUBACCOUNT,
+                sub,
                 market_id,
             ))?;
             let view = risk::RiskView::of(account, position, params).with_other_markets(oi, om);
@@ -1971,9 +2006,13 @@ pub mod pallet {
             Ok(())
         }
 
-        fn do_cancel_order(who: &T::AccountId, client_order_id: ClientOrderId) -> DispatchResult {
+        fn do_cancel_order(
+            who: &T::AccountId,
+            sub: SubaccountId,
+            client_order_id: ClientOrderId,
+        ) -> DispatchResult {
             let (market_id, order_id) =
-                UserOrderByClientId::<T>::get((who, DEFAULT_SUBACCOUNT, client_order_id))
+                UserOrderByClientId::<T>::get((who, sub, client_order_id))
                     .ok_or(Error::<T>::OrderNotFound)?;
             let mut market = Markets::<T>::get(market_id).ok_or(Error::<T>::MarketNotFound)?;
             let order = Orders::<T>::get(market_id, order_id).ok_or(Error::<T>::OrderNotFound)?;
@@ -2023,8 +2062,8 @@ pub mod pallet {
                     let order = Orders::<T>::get(market_id, order_id)
                         .ok_or(Error::<T>::InvariantViolation)?;
 
-                    let owner = Self::account_of(&order.owner);
-                    let position = Self::position_of(&order.owner, market_id);
+                    let owner = Self::account_of(&order.owner, order.subaccount);
+                    let position = Self::position_of(&order.owner, order.subaccount, market_id);
                     let expired = order.expires_at <= now;
                     let invalidated = order.client_order_id < owner.invalid_before;
                     let not_reducible =
@@ -2059,6 +2098,7 @@ pub mod pallet {
         /// The whole trading hot path for a single order.
         pub(crate) fn do_place_order(
             who: &T::AccountId,
+            sub: SubaccountId,
             request: OrderRequest<BlockNumberFor<T>>,
         ) -> Result<MatchStats, DispatchError> {
             let market_id = request.market_id;
@@ -2095,7 +2135,7 @@ pub mod pallet {
             }
 
             // 3. Account, client order id and flags ------------------------------
-            let mut account = Self::account_of(who);
+            let mut account = Self::account_of(who, sub);
             ensure!(
                 request.client_order_id > account.invalid_before,
                 Error::<T>::ClientOrderIdInvalidated
@@ -2103,7 +2143,7 @@ pub mod pallet {
             ensure!(
                 !UserOrderByClientId::<T>::contains_key((
                     who,
-                    DEFAULT_SUBACCOUNT,
+                    sub,
                     request.client_order_id
                 )),
                 Error::<T>::DuplicateClientOrderId
@@ -2124,11 +2164,12 @@ pub mod pallet {
             let params = Self::params_of(&market, mark);
 
             // 5. Position and reduce-only capacity -------------------------------
-            let mut position = Self::position_of(who, market_id);
+            let mut position = Self::position_of(who, sub, market_id);
             // Lazy settlement: funding accrued since the last touch plus any realised PnL
             // become cash here, before any risk decision reads them (P2-B §7).
             Self::settle_party(
                 who,
+                sub,
                 market_id,
                 &mut account,
                 &mut position,
@@ -2167,7 +2208,7 @@ pub mod pallet {
             // than the bound allows.
             let (oi, om, over) = Self::math(Self::cross_market_requirements(
                 who,
-                DEFAULT_SUBACCOUNT,
+                sub,
                 market_id,
             ))?;
             ensure!(!over, Error::<T>::TooManyClearingMarkets);
@@ -2249,12 +2290,12 @@ pub mod pallet {
                 let maker_position = if maker_is_taker {
                     taker.position
                 } else {
-                    Self::position_of(&maker_order.owner, market_id)
+                    Self::position_of(&maker_order.owner, maker_order.subaccount, market_id)
                 };
                 let maker_invalid_before = if maker_is_taker {
                     taker.account.invalid_before
                 } else {
-                    Self::account_of(&maker_order.owner).invalid_before
+                    Self::account_of(&maker_order.owner, maker_order.subaccount).invalid_before
                 };
 
                 let expired = maker_order.expires_at <= now;
@@ -2342,7 +2383,7 @@ pub mod pallet {
                     .saturating_add(taker_signed);
 
                 let maker_params =
-                    Self::maker_fee_params_of(&maker_order.owner, DEFAULT_SUBACCOUNT, params)?;
+                    Self::maker_fee_params_of(&maker_order.owner, maker_order.subaccount, params)?;
                 let mut maker_rebate: QuoteAmount = 0;
 
                 if maker_is_taker {
@@ -2390,10 +2431,11 @@ pub mod pallet {
                     tmp.apply(out2);
                     taker = tmp;
                 } else {
-                    let mut maker_acct = Self::account_of(&maker_order.owner);
+                    let mut maker_acct = Self::account_of(&maker_order.owner, maker_order.subaccount);
                     let mut maker_pos = maker_position;
                     Self::settle_party(
                         &maker_order.owner,
+                        maker_order.subaccount,
                         market_id,
                         &mut maker_acct,
                         &mut maker_pos,
@@ -2445,6 +2487,7 @@ pub mod pallet {
                     let mut maker_account = maker_state.account;
                     Self::refresh_restriction(
                         &maker_order.owner,
+                        maker_order.subaccount,
                         &mut maker_account,
                         &maker_state.position,
                         market_id,
@@ -2454,9 +2497,13 @@ pub mod pallet {
                     // so a touched position must never owe the epochs it did not participate in.
                     let mut maker_position = maker_state.position;
                     maker_position.funding_index = market.funding_index;
-                    Accounts::<T>::insert(&maker_order.owner, DEFAULT_SUBACCOUNT, maker_account);
+                    Accounts::<T>::insert(
+                        &maker_order.owner,
+                        maker_order.subaccount,
+                        maker_account,
+                    );
                     Positions::<T>::insert(
-                        (&maker_order.owner, DEFAULT_SUBACCOUNT, market_id),
+                        (&maker_order.owner, maker_order.subaccount, market_id),
                         maker_position,
                     );
                     taker = taker_tmp;
@@ -2606,6 +2653,7 @@ pub mod pallet {
 
                     let order = Order {
                         owner: who.clone(),
+                        subaccount: sub,
                         market_id,
                         client_order_id: request.client_order_id,
                         side: request.side,
@@ -2624,7 +2672,7 @@ pub mod pallet {
                     let scans = Self::enqueue_order(&mut market, market_id, order_id, order)?;
                     stats.level_scans = stats.level_scans.saturating_add(scans);
                     UserOrderByClientId::<T>::insert(
-                        (who, DEFAULT_SUBACCOUNT, request.client_order_id),
+                        (who, sub, request.client_order_id),
                         (market_id, order_id),
                     );
                     Self::deposit_event(Event::OrderAccepted {
@@ -2638,14 +2686,21 @@ pub mod pallet {
 
             // 10. Persist the taker and the mutated market ---------------------------
             let mut final_account = taker.account;
-            Self::refresh_restriction(who, &mut final_account, &taker.position, market_id, params)?;
+            Self::refresh_restriction(
+                who,
+                sub,
+                &mut final_account,
+                &taker.position,
+                market_id,
+                params,
+            )?;
             // Same lazy-settlement mark for the taker, and keep net open interest in sync.
             let mut taker_position = taker.position;
             taker_position.funding_index = market.funding_index;
             market.net_oi_lots = funding::apply_net_oi(market.net_oi_lots, net_oi_delta)
                 .map_err(|_| Error::<T>::ArithmeticOverflow)?;
-            Accounts::<T>::insert(who, DEFAULT_SUBACCOUNT, final_account);
-            Positions::<T>::insert((who, DEFAULT_SUBACCOUNT, market_id), taker_position);
+            Accounts::<T>::insert(who, sub, final_account);
+            Positions::<T>::insert((who, sub, market_id), taker_position);
             Markets::<T>::insert(market_id, market);
             FeePool::<T>::put(fee_pool);
 
@@ -2659,19 +2714,21 @@ pub mod pallet {
         fn liquidate_account(
             keeper: &T::AccountId,
             who: &T::AccountId,
+            subaccount: SubaccountId,
             market_id: MarketId,
             lots: Lots,
         ) -> Result<Lots, DispatchError> {
-            Self::do_liquidate_account(who, market_id, lots, keeper)
+            Self::do_liquidate_account(who, subaccount, market_id, lots, keeper)
         }
 
         fn adl_close(
             who: &T::AccountId,
+            subaccount: SubaccountId,
             market_id: MarketId,
             lots: Lots,
             price_ticks: PriceTicks,
         ) -> Result<(), DispatchError> {
-            Self::do_adl_close(who, market_id, lots, price_ticks)
+            Self::do_adl_close(who, subaccount, market_id, lots, price_ticks)
         }
 
         fn pay_keeper(keeper: &T::AccountId) -> Result<QuoteAmount, DispatchError> {
@@ -2691,18 +2748,18 @@ pub mod pallet {
             Ok(amount)
         }
 
-        fn note_adl_shed(who: &T::AccountId, notional: QuoteAmount) {
-            ResidualLossOf::<T>::mutate(who, |loss| {
+        fn note_adl_shed(who: &T::AccountId, sub: SubaccountId, notional: QuoteAmount) {
+            ResidualLossOf::<T>::mutate((who, sub), |loss| {
                 loss.shed_notional = loss.shed_notional.saturating_add(notional)
             });
         }
 
-        fn adl_rank(who: &T::AccountId, market_id: MarketId) -> Option<AdlRank> {
+        fn adl_rank(who: &T::AccountId, sub: SubaccountId, market_id: MarketId) -> Option<AdlRank> {
             let market = Markets::<T>::get(market_id)?;
             let mark = Self::mark_price_of(market_id, &market).ok()?;
             let params = Self::params_of(&market, mark);
-            let account = Self::account_of(who);
-            let position = Self::position_of(who, market_id);
+            let account = Self::account_of(who, sub);
+            let position = Self::position_of(who, sub, market_id);
             if position.size_lots == 0 {
                 return None;
             }
@@ -2726,8 +2783,16 @@ pub mod pallet {
             })
         }
 
-        fn residual_loss_of(who: &T::AccountId) -> ResidualLoss {
-            ResidualLossOf::<T>::get(who)
+        fn residual_loss_of(who: &T::AccountId, sub: SubaccountId) -> ResidualLoss {
+            ResidualLossOf::<T>::get((who, sub))
+        }
+
+        fn subaccounts(who: &T::AccountId) -> sp_std::vec::Vec<SubaccountId> {
+            let mut subs = SubaccountIndex::<T>::get(who).to_vec();
+            if !subs.contains(&DEFAULT_SUBACCOUNT) {
+                subs.insert(0, DEFAULT_SUBACCOUNT);
+            }
+            subs
         }
     }
 
@@ -2760,6 +2825,7 @@ pub mod pallet {
         /// implementation that could drift away from it.
         fn do_liquidate_account(
             who: &T::AccountId,
+            sub: SubaccountId,
             market_id: MarketId,
             requested: Lots,
             keeper: &T::AccountId,
@@ -2769,26 +2835,27 @@ pub mod pallet {
             let mark = Self::mark_price_of(market_id, &market)?;
             let params = Self::params_of(&market, mark);
 
-            let mut account = Self::account_of(who);
-            let mut position = Self::position_of(who, market_id);
+            let mut account = Self::account_of(who, sub);
+            let mut position = Self::position_of(who, sub, market_id);
             // Settle first *and persist it*: this is where an uncollectable funding or PnL
             // shortfall reaches the insurance fund, and the order below must then see the
             // settled state rather than being charged the same funding twice.
             Self::settle_party(
                 who,
+                sub,
                 market_id,
                 &mut account,
                 &mut position,
                 market.funding_index,
             )?;
-            Accounts::<T>::insert(who, DEFAULT_SUBACCOUNT, account.clone());
-            Positions::<T>::insert((who, DEFAULT_SUBACCOUNT, market_id), position.clone());
+            Accounts::<T>::insert(who, sub, account.clone());
+            Positions::<T>::insert((who, sub, market_id), position.clone());
 
             let size_before = position.size_lots;
             ensure!(size_before != 0, Error::<T>::NotLiquidatable);
             let (oi, om, over) = Self::math(Self::cross_market_requirements(
                 who,
-                DEFAULT_SUBACCOUNT,
+                sub,
                 market_id,
             ))?;
             ensure!(!over, Error::<T>::TooManyClearingMarkets);
@@ -2804,7 +2871,7 @@ pub mod pallet {
             // covers whatever the resulting settlement cannot collect.
             let closed = if Self::math(view.equity())? <= 0 {
                 let lots = size_before.unsigned_abs();
-                Self::do_adl_close(who, market_id, lots, mark)?;
+                Self::do_adl_close(who, sub, market_id, lots, mark)?;
                 lots
             } else {
                 let q = if requested == 0 {
@@ -2849,10 +2916,10 @@ pub mod pallet {
                 // Liquidations are permissionless and tend to arrive in bursts, so paying the
                 // maximum every time would exhaust the block budget and lock *further*
                 // liquidations out — exactly the liveness failure the budget exists to prevent.
-                let stats = Self::do_place_order(who, request)?;
+                let stats = Self::do_place_order(who, sub, request)?;
                 Self::consume_block_budget(T::WeightInfo::liquidate_account(stats.matches))?;
 
-                let after = Self::position_of(who, market_id);
+                let after = Self::position_of(who, sub, market_id);
                 let closed = size_before
                     .unsigned_abs()
                     .saturating_sub(after.size_lots.unsigned_abs());
@@ -2877,12 +2944,12 @@ pub mod pallet {
             // configured penalty in full would move real tokens out of custody that nobody
             // ever paid, and the difference would come out of *other* users' collateral —
             // the implicit socialisation §8.5 §3 forbids.
-            let mut account_after = Self::account_of(who);
+            let mut account_after = Self::account_of(who, sub);
             let charged = penalty.min(account_after.collateral);
             let rebate = rebate.min(charged);
             let to_insurance = charged.saturating_sub(rebate);
             account_after.collateral = account_after.collateral.saturating_sub(charged);
-            Accounts::<T>::insert(who, DEFAULT_SUBACCOUNT, account_after);
+            Accounts::<T>::insert(who, sub, account_after);
             KeeperRebateOf::<T>::mutate(keeper, |pool| *pool = pool.saturating_add(rebate));
 
             // Failure to move the money must not revert the liquidation itself.
@@ -2902,15 +2969,17 @@ pub mod pallet {
         /// after so the result is left in cash terms.
         fn do_adl_close(
             who: &T::AccountId,
+            sub: SubaccountId,
             market_id: MarketId,
             lots: Lots,
             price_ticks: PriceTicks,
         ) -> DispatchResult {
             let market = Markets::<T>::get(market_id).ok_or(Error::<T>::MarketNotFound)?;
-            let mut account = Self::account_of(who);
-            let mut position = Self::position_of(who, market_id);
+            let mut account = Self::account_of(who, sub);
+            let mut position = Self::position_of(who, sub, market_id);
             Self::settle_party(
                 who,
+                sub,
                 market_id,
                 &mut account,
                 &mut position,
@@ -2933,6 +3002,7 @@ pub mod pallet {
             // Fold what the offset just realised, leaving the account in cash terms.
             Self::settle_party(
                 who,
+                sub,
                 market_id,
                 &mut account,
                 &mut position,
@@ -2957,7 +3027,7 @@ pub mod pallet {
                     0
                 };
                 if known_side != 0 {
-                    ResidualLossOf::<T>::mutate(who, |loss| {
+                    ResidualLossOf::<T>::mutate((who, sub), |loss| {
                         if loss.amount > 0 && loss.side_sign == 0 {
                             loss.side_sign = known_side
                         }
@@ -2965,8 +3035,8 @@ pub mod pallet {
                 }
             }
 
-            Accounts::<T>::insert(who, DEFAULT_SUBACCOUNT, account);
-            Positions::<T>::insert((who, DEFAULT_SUBACCOUNT, market_id), position);
+            Accounts::<T>::insert(who, sub, account);
+            Positions::<T>::insert((who, sub, market_id), position);
             Self::deposit_event(Event::AdlClosed {
                 who: who.clone(),
                 market_id,
@@ -3100,16 +3170,13 @@ pub mod pallet {
             let who = <T::Signer as sp_runtime::traits::IdentifyAccount>::into_account(
                 action.signer.clone(),
             );
-            // The pool must not accept what the dispatchable will refuse (S0-1).
-            ensure!(
-                action.subaccount == DEFAULT_SUBACCOUNT,
-                Error::<T>::SubaccountUnsupported
-            );
             let payload = Self::signed_action_payload(action);
             ensure!(
                 sp_runtime::traits::Verify::verify(&action.signature, &payload[..], &who),
                 Error::<T>::InvalidActionSignature
             );
+            // S3-1: keep the sub-account index current for the liquidation pallet's enumeration.
+            Self::ensure_subaccount(who.clone(), action.subaccount)?;
             // Expiry before the nonce: an expired signature is a leaked signature, and
             // refusing it must not cost the account anything.
             Self::ensure_action_fresh(action.expires_at)?;
@@ -3155,7 +3222,7 @@ pub mod pallet {
                 let Ok(mark) = Self::mark_price_of(market_id, &market) else {
                     continue;
                 };
-                let account = Self::account_of(&who);
+                let account = Self::account_of(&who, _subaccount);
                 let view = risk::RiskView::of(&account, &position, Self::params_of(&market, mark));
                 if let Ok(pnl) = view.unrealized_pnl() {
                     total = total.saturating_add(pnl);

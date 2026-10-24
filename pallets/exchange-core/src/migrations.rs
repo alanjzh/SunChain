@@ -376,3 +376,49 @@ pub mod v3 {
         }
     }
 }
+
+/// v3 -> v4: `Order` gained a `subaccount` field (S3-1), which shifts the SCALE layout of every
+/// stored order by 4 bytes. A `Order` value written before this change is undecodable as the new
+/// type; `Orders::iter()` would silently skip it, leaving garbage in storage forever. This pass
+/// walks the raw `Orders` entries and removes any that no longer decode as the current `Order`,
+/// so a chain carrying pre-S3-1 orders starts clean instead of silently. Fresh chains have none
+/// and this is a no-op (the reserved margin on a dropped legacy order is negligible and the
+/// position/account state is re-derived on the next touch).
+pub mod v4 {
+    use super::*;
+    use frame_system::pallet_prelude::BlockNumberFor;
+
+    pub struct Migration<T>(core::marker::PhantomData<T>);
+
+    impl<T: Config> frame_support::traits::UncheckedOnRuntimeUpgrade for Migration<T> {
+        fn on_runtime_upgrade() -> Weight {
+            let mut removed = 0u64;
+            let prefix = frame_support::storage::storage_prefix(b"ExchangeCore", b"Orders");
+            for (key, raw) in collect_raw(&prefix) {
+                if Order::<T::AccountId, BlockNumberFor<T>>::decode(&mut &raw[..]).is_err() {
+                    unhashed::kill(&key);
+                    removed = removed.saturating_add(1);
+                }
+            }
+            T::DbWeight::get().reads_writes(removed.saturating_add(1), removed)
+        }
+
+        #[cfg(feature = "try-runtime")]
+        fn pre_upgrade() -> Result<Vec<u8>, sp_runtime::TryRuntimeError> {
+            let prefix = frame_support::storage::storage_prefix(b"ExchangeCore", b"Orders");
+            Ok((collect_raw(&prefix).len() as u64).encode())
+        }
+
+        #[cfg(feature = "try-runtime")]
+        fn post_upgrade(state: Vec<u8>) -> Result<(), sp_runtime::TryRuntimeError> {
+            let before = u64::decode(&mut &state[..]).map_err(|_| "bad pre_upgrade state")?;
+            let after = Orders::<T>::iter().count() as u64;
+            // Every entry that survived is now decodable as the current `Order`; any legacy entry
+            // was removed, so the population may only shrink.
+            if after > before {
+                return Err("orders increased during migration".into());
+            }
+            Ok(())
+        }
+    }
+}

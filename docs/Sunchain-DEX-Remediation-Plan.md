@@ -207,7 +207,7 @@
 
 ### S3 · 子账户完整化与发布门禁（约 2–3 周）
 
-- **S3-1 子账户完整传递（P0-1）**：`subaccount` 显式传入 `do_place_order` / `do_cancel_order` / `account_of` / `position_of` 及 13 处热路径写、`UserOrderByClientId` 键、风险聚合、清算、费率等级、事件、Runtime API；补非零子账户端到端测试；完成后移除 S0-1 的拒绝分支。
+- **S3-1 子账户完整传递（P0-1）** — ✅ 已完成（2026-10-24，模型 A：每子账户独立抵押品）：`subaccount` 贯穿全部交易路径——`deposit_collateral`/`withdraw_collateral`（新增 `subaccount` 参数，默认 0 向后兼容）、`place_order`/`cancel_order`/`cancel_up_to`/signed `execute_batch`、`do_place_order`/`do_cancel_order`、撮合（`order.subaccount` 归属保证金/仓位/盈亏）、maker 结算、`account_of`/`position_of`、`cross_market_requirements`（改 `iter_prefix((who, sub))`，跨市场保证金逐子账户）、清算/ADL（`liquidate_account`/`adl_close`/`adl_rank`/`residual_loss_of`/`note_adl_shed` 均带 sub）、费率等级。`Order` 新增 `subaccount` 字段并配 **v4 迁移**（丢弃无法按新布局解码的旧单）；`SubaccountIndex`+`MaxSubaccountsPerAccount` 启用（`ensure_subaccount` 首次使用登记、超限拒绝）；**S0-1 两处拒绝分支已删**（`execute_exchange_batch` 校验 + `validate_signed_action` 提交时）。liquidation pallet 的 ADL 候选按子账户展开（`ExchangeEngine::subaccounts`）。测试：非零子账户可用且登记/限额、跨子账户抵押品隔离（sub-0 不能用 sub-5 的钱）、v4 迁移在真实 runtime + try-runtime 下保留新单丢弃旧单。**未纳入**：`CollateralDeposited`/`OrdersInvalidatedUpTo` 事件未加 `subaccount` 字段（纯信息性，避免动 e2e 事件解析）
 - **S3-2 ADL 候选（P1-4）**：短期在 `pallets/liquidation` 明确 best-effort 语义（注释/文档/错误码），不声称全局公平；中期选"有界可验证扫描 + 分页游标 + 多 block 调度"。
 - **S3-3 门禁**：CI 增加独立 WASM job、try-runtime CLI 冒烟、benchmark 运行（当前只编译）、`admin` / `langto_binding` 纳入 default-members；migration 在真实快照上做 pre/post。
 - **S3-4 演练**：多验证人重组、网络分区、节点重启、pool 重传、清算高峰。

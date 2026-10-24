@@ -18,7 +18,7 @@ pub mod pallet {
 	use super::*;
 	use crate::weights::WeightInfo;
 	use exchange_primitives::{
-		ExchangeEngine, MarketId, PriceTicks, QuoteAmount, PPM_DENOM,
+		ExchangeEngine, MarketId, PriceTicks, QuoteAmount, PPM_DENOM, SubaccountId,
 	};
 	use frame_support::pallet_prelude::*;
 	use frame_system::pallet_prelude::*;
@@ -94,6 +94,7 @@ pub mod pallet {
 		pub fn liquidate(
 			origin: OriginFor<T>,
 			who: T::AccountId,
+			subaccount: SubaccountId,
 			market_id: MarketId,
 			lots: exchange_primitives::Lots,
 		) -> DispatchResult {
@@ -102,7 +103,7 @@ pub mod pallet {
 			// Every rejection reason (not underwater, stale price, no book depth inside the
 			// slippage band) is a legitimate outcome for a keeper racing other keepers, so it
 			// surfaces as an error rather than silently succeeding.
-			let closed = T::Engine::liquidate_account(&keeper, &who, market_id, lots)?;
+			let closed = T::Engine::liquidate_account(&keeper, &who, subaccount, market_id, lots)?;
 			ensure!(closed > 0, Error::<T>::NothingLiquidated);
 
 			// Pay whatever this liquidation accrued. A keeper can never be paid more than the
@@ -132,22 +133,31 @@ pub mod pallet {
 		pub fn adl(
 			origin: OriginFor<T>,
 			bankrupt: T::AccountId,
+			subaccount: SubaccountId,
 			candidates: BoundedVec<T::AccountId, T::MaxLiquidationsPerCall>,
 		) -> DispatchResult {
 			let keeper = ensure_signed(origin)?;
 
 			// ADL only responds to a loss that collateral, liquidation and the insurance fund
 			// all failed to cover. Without one there is no exposure worth forcing anyone out of.
-			let loss = T::Engine::residual_loss_of(&bankrupt);
+			let loss = T::Engine::residual_loss_of(&bankrupt, subaccount);
 			// ADL may shed exposure worth the uncovered loss — no more, and exactly once.
 			// Without this a keeper could replay the call every block for as long as the loss
 			// stays recorded, which is forever.
 			let budget = loss.amount.saturating_sub(loss.shed_notional);
 			ensure!(budget > 0, Error::<T>::NoResidualLoss);
 
+			// Expand each proposed account into its sub-accounts so a non-default sub-account can
+			// also be force-reduced (S3-1). The ranking closure picks the right sub per account.
+			let mut expanded: sp_std::vec::Vec<(T::AccountId, SubaccountId)> = sp_std::vec::Vec::new();
+			for account in candidates.into_iter() {
+				for sub in T::Engine::subaccounts(&account) {
+					expanded.push((account.clone(), sub));
+				}
+			}
 			let targets = selection::select_adl_targets(
-				candidates.into_iter(),
-				|who| T::Engine::adl_rank(who, loss.market_id),
+				expanded.into_iter(),
+				|target| T::Engine::adl_rank(&target.0, target.1, loss.market_id),
 				loss.side_sign,
 				T::MinAdlRoePpm::get(),
 				T::MaxLiquidationsPerCall::get() as usize,
@@ -163,11 +173,11 @@ pub mod pallet {
 			let mut remaining: QuoteAmount = budget;
 			let mut total_lots: exchange_primitives::Lots = 0;
 			let mut shed_notional: exchange_primitives::QuoteAmount = 0;
-			for target in &targets {
+			for (target, target_sub) in &targets {
 				if remaining == 0 {
 					break
 				}
-				let rank = T::Engine::adl_rank(target, loss.market_id)
+				let rank = T::Engine::adl_rank(target, *target_sub, loss.market_id)
 					.ok_or(Error::<T>::NoAdlCandidates)?;
 				let price = Self::adl_execution_price(
 					rank.mark_price_ticks,
@@ -183,7 +193,7 @@ pub mod pallet {
 				if lots == 0 {
 					continue
 				}
-				T::Engine::adl_close(target, loss.market_id, lots, price)?;
+				T::Engine::adl_close(target, *target_sub, loss.market_id, lots, price)?;
 
 				total_lots = total_lots.saturating_add(lots);
 				shed_notional = shed_notional.saturating_add(
@@ -196,7 +206,7 @@ pub mod pallet {
 			// §8.5.1: ADL removes exposure worth the uncovered loss — no more. Folding the shed
 			// notional back into the record is what makes it self-limiting; without it a keeper
 			// could replay this every block for as long as the loss stays non-zero.
-			T::Engine::note_adl_shed(&bankrupt, shed_notional);
+			T::Engine::note_adl_shed(&bankrupt, subaccount, shed_notional);
 
 			Self::deposit_event(Event::AutoDeleveraged {
 				keeper,
