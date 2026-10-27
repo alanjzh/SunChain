@@ -2,7 +2,8 @@ use frame_support::{
 	derive_impl, parameter_types, PalletId,
 	traits::{ConstBool, ConstI64, ConstU128, ConstU32, ConstU64, ConstU8,
 			VariantCountOf, EitherOfDiverse, Nothing, AsEnsureOriginWithArg,
-			tokens::imbalance::ResolveTo,FindAuthor, OnFinalize, OnTimestampSet
+			tokens::imbalance::ResolveTo,FindAuthor, OnFinalize, OnTimestampSet,
+			OneSessionHandler
 	},
 	weights::{
 		constants::{RocksDbWeight, WEIGHT_REF_TIME_PER_SECOND},
@@ -24,7 +25,7 @@ use frame_election_provider_support::{
 };	
 use pallet_transaction_payment::{ConstFeeMultiplier, FungibleAdapter, Multiplier};
 use sp_consensus_aura::sr25519::AuthorityId as AuraId;
-use sp_runtime::{curve::PiecewiseLinear, traits::{ConvertInto, Identity, OpaqueKeys, Zero}, traits::One, transaction_validity::{TransactionPriority, TransactionSource, TransactionValidity}, offchain::Timestamp, Perbill, Vec, OpaqueExtrinsic};
+use sp_runtime::{curve::PiecewiseLinear, BoundToRuntimeAppPublic, traits::{ConvertInto, Identity, OpaqueKeys, Zero}, traits::One, transaction_validity::{TransactionPriority, TransactionSource, TransactionValidity}, offchain::Timestamp, Perbill, Vec, OpaqueExtrinsic};
 use sp_runtime::{
 	generic, impl_opaque_keys,
 	traits::{
@@ -38,6 +39,8 @@ use sp_version::RuntimeVersion;
 use pallet_im_online::sr25519::AuthorityId as ImOnlineId;
 
 use pallet_im_online::Call as ImOnlineCall;
+use sunlead_primitives::SunLeadId;
+use pallet_sunlead::SunLeadKeyLookup;
 use crate::{precompiles::FrontierPrecompiles, BaseFee, EVMChainId, UncheckedExtrinsic};
 use core::marker::PhantomData;
 use fp_account::{EthereumSignature, EthereumSigner};
@@ -539,9 +542,51 @@ impl_opaque_keys! {
 		pub babe: Babe,
 		pub im_online: ImOnline,
 		pub authority_discovery: AuthorityDiscovery,
+		pub sunl: SunLeadSessionKey,
 		// pub mixnet: Mixnet,
 		// pub beefy: Beefy,
 	}
+}
+
+impl SunLeadKeyLookup for SessionKeys {
+	fn sunl_key(&self) -> Option<SunLeadId> {
+		Some(self.sunl.clone())
+	}
+}
+
+/// Session-key handler placeholder for the `sunl` deterministic-leader key.
+///
+/// During P2 the `sunl` key is registered in `SessionKeys` and stored in
+/// `NextKeys`, but no consensus logic reacts to session rotation yet (that is
+/// P3, when SunLead block production/import is wired). The `pallet_sunlead`
+/// hook reads the key from `NextKeys` directly to build the epoch snapshot, so
+/// this handler is intentionally a no-op.
+pub struct SunLeadSessionKey;
+
+impl BoundToRuntimeAppPublic for SunLeadSessionKey {
+	type Public = SunLeadId;
+}
+
+type SunLeadValidatorId = <Runtime as frame_system::Config>::AccountId;
+
+impl OneSessionHandler<SunLeadValidatorId> for SunLeadSessionKey {
+	type Key = SunLeadId;
+
+	fn on_genesis_session<'a, I: 'a>(_validators: I)
+	where
+		I: Iterator<Item = (&'a SunLeadValidatorId, SunLeadId)>,
+		SunLeadValidatorId: 'a,
+	{
+	}
+
+	fn on_new_session<'a, I: 'a>(_changed: bool, _validators: I, _queued_validators: I)
+	where
+		I: Iterator<Item = (&'a SunLeadValidatorId, SunLeadId)>,
+		SunLeadValidatorId: 'a,
+	{
+	}
+
+	fn on_disabled(_validator_index: u32) {}
 }
 
 impl pallet_session::Config for Runtime {
@@ -556,6 +601,21 @@ impl pallet_session::Config for Runtime {
 	type DisablingStrategy = pallet_session::disabling::UpToLimitWithReEnablingDisablingStrategy;
 
 	type WeightInfo = pallet_session::weights::SubstrateWeight<Runtime>;
+}
+
+impl pallet_sunlead::Config for Runtime {
+	type RuntimeEvent = RuntimeEvent;
+	// `Runtime` implements `pallet_session::Config`; its `Keys` is `SessionKeys`,
+	// which carries the `sunl` key handled by `SunLeadKeyLookup`.
+	type Session = Runtime;
+	type Keys = SessionKeys;
+	type Staking = Runtime;
+	// Account ids are identical across session / staking / frame_system (H160),
+	// so the identity converter suffices.
+	type StakingAccountConvert = sp_runtime::traits::Identity;
+	type Babe = Runtime;
+	type Grandpa = Runtime;
+	type ChainId = ConstU64<1>;
 }
 
 impl pallet_session::historical::Config for Runtime {

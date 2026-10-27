@@ -10,6 +10,7 @@ mod cli;
 mod command;
 mod rpc;
 mod service;
+mod sunlead_consensus;
 mod node_primitives;
 mod eth;
 mod client;

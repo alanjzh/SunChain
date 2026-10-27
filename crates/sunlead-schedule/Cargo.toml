@@ -1,0 +1,33 @@
+[package]
+name = "sunlead-schedule"
+version = "0.1.0"
+license = "MIT-0"
+edition = "2021"
+description = "SunLead deterministic, stake-weighted epoch schedule and Merkle schedule root (no_std)."
+publish = false
+
+[dependencies]
+sunlead-primitives = { path = "../sunlead-primitives", default-features = false }
+codec = { features = ["derive", "max-encoded-len"], workspace = true }
+scale-info = { features = ["derive"], workspace = true }
+sp-core = { default-features = false, workspace = true }
+sp-runtime = { default-features = false, workspace = true }
+sp-crypto-hashing = { default-features = false, workspace = true }
+binary-merkle-tree = { default-features = false, workspace = true }
+
+[dev-dependencies]
+sp-core = { default-features = true, workspace = true }
+serde = { features = ["derive"], workspace = true }
+serde_json = { workspace = true, features = ["std"] }
+
+[features]
+default = ["std"]
+std = [
+	"sunlead-primitives/std",
+	"codec/std",
+	"scale-info/std",
+	"sp-core/std",
+	"sp-runtime/std",
+	"sp-crypto-hashing/std",
+	"binary-merkle-tree/std",
+]

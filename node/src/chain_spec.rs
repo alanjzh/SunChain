@@ -23,6 +23,7 @@ use sp_consensus_babe::AuthorityId as BabeId;
 use sp_authority_discovery::AuthorityId as AuthorityDiscoveryId;
 use sp_consensus_grandpa::AuthorityId as GrandpaId;
 use pallet_im_online::sr25519::AuthorityId as ImOnlineId;
+use sunlead_primitives::SunLeadId;
 use sp_core::{crypto::UncheckedInto, ecdsa, sr25519, Pair, Public, H160, U256};
 use sp_staking::{
 	StakerStatus,
@@ -57,12 +58,15 @@ fn session_keys(
     im_online: ImOnlineId,
     // sr25519
     authority_discovery: AuthorityDiscoveryId,
+    // sr25519 (SunLead deterministic-leader session key)
+    sunl: SunLeadId,
 ) -> SessionKeys {
     SessionKeys {
         grandpa,
         babe,
         im_online,
         authority_discovery,
+        sunl,
     }
 }
 
@@ -115,6 +119,7 @@ fn configure_accounts(
         BabeId,
         ImOnlineId,
         AuthorityDiscoveryId,
+        SunLeadId,
     )>,
     initial_nominators: Vec<AccountId>,
     endowed_accounts: Option<Vec<AccountId>>,
@@ -127,6 +132,7 @@ fn configure_accounts(
         BabeId,
         ImOnlineId,
         AuthorityDiscoveryId,
+        SunLeadId,
     )>,
     Vec<AccountId>,
     usize,
@@ -169,6 +175,7 @@ pub fn testnet_genesis(
         BabeId,
         ImOnlineId,
         AuthorityDiscoveryId,
+        SunLeadId,
     )>,
     initial_nominators: Vec<AccountId>,
     root_key: AccountId,
@@ -199,6 +206,7 @@ pub fn testnet_genesis(
                             x.3.clone(),
                             x.4.clone(),
                             x.5.clone(),
+                            x.6.clone(),
                         ),
                     )
                 })
@@ -258,6 +266,7 @@ pub fn authority_keys_from_alice() -> (
     BabeId,
     ImOnlineId,
     AuthorityDiscoveryId,
+    SunLeadId,
 ) {
     let seed = "Alice";
     (
@@ -269,6 +278,7 @@ pub fn authority_keys_from_alice() -> (
         get_from_seed::<BabeId>(seed),
         get_from_seed::<ImOnlineId>(seed),
         get_from_seed::<AuthorityDiscoveryId>(seed),
+        get_from_seed::<SunLeadId>(seed),
     )
 }
 

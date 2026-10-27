@@ -44,6 +44,12 @@ use std::{sync::Arc, time::Duration};
 use babe_consensus_data_provider::BabeConsensusDataProvider;
 use frame_benchmarking_cli::SUBSTRATE_REFERENCE_HARDWARE;
 
+use crate::sunlead_consensus::{
+	start_sunlead, sunlead_import_queue, SunLeadBlockImport, SunLeadParams,
+};
+use sp_api::ProvideRuntimeApi;
+use sunchain_runtime::apis::SunLeadApi;
+
 use fc_storage::StorageOverrideHandler;
 use sp_core::H256;
 use sp_runtime::traits::{Block as BlockT, NumberFor};
@@ -125,6 +131,11 @@ type FullBabe = sc_consensus_babe::BabeBlockImport<
 type FullFrontier = FrontierBlockImport<Block, FullBabe,FullClient>;
 type EffectiveFullBlockImport = FullFrontier;
 
+// The effective block import used by SunLead: it applies the SunLead pre-digest
+// then delegates to the Frontier -> GRANDPA import chain (BABE is bypassed).
+type SunLeadEffectiveImport = FrontierBlockImport<Block, FullGrandpa, FullClient>;
+type FullSunLeadBlockImport = SunLeadBlockImport<Block, SunLeadEffectiveImport>;
+
 pub fn new_partial<NB>(
     config: &Configuration,
     eth_config: &EthConfiguration,
@@ -150,6 +161,8 @@ pub fn new_partial<NB>(
             ),
             Option<Telemetry>,
 			BabeWorkerHandle<Block>,
+            bool,
+            FullSunLeadBlockImport,
         ),
     >,
     ServiceError,
@@ -263,7 +276,7 @@ where
         sc_consensus_babe::import_queue(sc_consensus_babe::ImportQueueParams {
             link: babe_link.clone(),
             block_import: babe_block_import.clone(),
-            justification_import: Some(Box::new(justification_import)),
+            justification_import: Some(Box::new(justification_import.clone())),
             client: client.clone(),
             select_chain: select_chain.clone(),
             create_inherent_data_providers: move |_, ()| async move {
@@ -282,6 +295,30 @@ where
             telemetry: telemetry.as_ref().map(|x| x.handle()),
             offchain_tx_pool_factory: OffchainTransactionPoolFactory::new(transaction_pool.clone()),
         })?;
+
+    // --- SunLead parallel consensus (gated, BABE remains the default) ---
+    // The SunLead import queue wraps the Frontier -> GRANDPA import chain and runs
+    // the same verifier as the import path. Which queue is actually used for the
+    // network is decided below based on the runtime activation flag.
+    let sunlead_block_import = SunLeadBlockImport::new(frontier_block_import.clone());
+    let genesis_hash = client
+        .block_hash(0)
+        .ok()
+        .flatten()
+        .expect("Genesis block exists; qed");
+    let sunlead_api = sp_api::ProvideRuntimeApi::runtime_api(client.as_ref());
+    let use_sunlead =
+        sunchain_runtime::apis::SunLeadApi::is_active(&*sunlead_api, genesis_hash).unwrap_or(false);
+    let sunlead_import_queue = sunlead_import_queue(
+        sunlead_block_import.clone(),
+        client.clone(),
+        Some(Box::new(justification_import.clone())),
+        genesis_hash,
+        &task_manager.spawn_essential_handle(),
+        config.prometheus_registry(),
+    );
+    log::info!(target: "sunlead", "SunLead activation flag (is_active) = {}", use_sunlead);
+    let import_queue = if use_sunlead { sunlead_import_queue } else { import_queue };
 
     // let PartialComponents {
     // 	client,
@@ -333,7 +370,7 @@ where
         keystore_container,
         select_chain,
         transaction_pool,
-        other: (import_setup, telemetry,babe_worker_handle,),
+        other: (import_setup, telemetry, babe_worker_handle, use_sunlead, sunlead_block_import),
     })
 }
 
@@ -394,7 +431,7 @@ pub async fn new_full_base<N: NetworkBackend<Block, <Block as sp_runtime::traits
         keystore_container,
         select_chain,
         transaction_pool,
-        other: (import_setup, mut telemetry,babe_worker_handle,),
+        other: (import_setup, mut telemetry, babe_worker_handle, use_sunlead, sunlead_block_import),
     } = new_partial::<N>(&config, &eth_config)?;
 
 	
@@ -861,48 +898,86 @@ pub async fn new_full_base<N: NetworkBackend<Block, <Block as sp_runtime::traits
 
         let client_clone = client.clone();
         let slot_duration = babe_link.config().slot_duration();
-        let babe_config = sc_consensus_babe::BabeParams {
-            keystore: keystore_container.keystore(),
-            client: client.clone(),
-            select_chain,
-            env: proposer,
-            block_import,
-            sync_oracle: sync_service.clone(),
-            justification_sync_link: sync_service.clone(),
-            create_inherent_data_providers: move |parent, ()| {
-                let client_clone = client_clone.clone();
-                async move {
-                    let timestamp = sp_timestamp::InherentDataProvider::from_system_time();
 
-                    let slot =
-						sp_consensus_babe::inherents::InherentDataProvider::from_timestamp_and_slot_duration(
-							*timestamp,
-							slot_duration,
-						);
+        if use_sunlead {
+            log::info!(target: "sunlead", "starting SunLead authoring (is_active = true)");
+            let sunlead_params = SunLeadParams {
+                keystore: keystore_container.keystore(),
+                client: client.clone(),
+                select_chain,
+                env: proposer,
+                block_import: sunlead_block_import,
+                sync_oracle: sync_service.clone(),
+                justification_sync_link: sync_service.clone(),
+                create_inherent_data_providers: move |_, ()| {
+                    async move {
+                        let timestamp = sp_timestamp::InherentDataProvider::from_system_time();
+                        let slot =
+							sp_consensus_babe::inherents::InherentDataProvider::from_timestamp_and_slot_duration(
+								*timestamp,
+								slot_duration,
+							);
+                        Ok((slot, timestamp))
+                    }
+                },
+                force_authoring,
+                backoff_authoring_blocks,
+                genesis_hash,
+                slot_duration,
+                block_proposal_slot_portion: sc_consensus_slots::SlotProportion::new(0.5),
+                max_block_proposal_slot_portion: None,
+                telemetry: telemetry.as_ref().map(|x| x.handle()),
+            };
+            let sunlead = start_sunlead(sunlead_params);
+            task_manager.spawn_essential_handle().spawn_blocking(
+                "sunlead-proposer",
+                Some("block-authoring"),
+                sunlead,
+            );
+        } else {
+            let babe_config = sc_consensus_babe::BabeParams {
+                keystore: keystore_container.keystore(),
+                client: client.clone(),
+                select_chain,
+                env: proposer,
+                block_import,
+                sync_oracle: sync_service.clone(),
+                justification_sync_link: sync_service.clone(),
+                create_inherent_data_providers: move |parent, ()| {
+                    let client_clone = client_clone.clone();
+                    async move {
+                        let timestamp = sp_timestamp::InherentDataProvider::from_system_time();
 
-                    let storage_proof =
-                        sp_transaction_storage_proof::registration::new_data_provider(
-                            &*client_clone,
-                            &parent,
-                        )?;
+                        let slot =
+							sp_consensus_babe::inherents::InherentDataProvider::from_timestamp_and_slot_duration(
+								*timestamp,
+								slot_duration,
+							);
 
-                    Ok((slot, timestamp, storage_proof))
-                }
-            },
-            force_authoring,
-            backoff_authoring_blocks,
-            babe_link,
-            block_proposal_slot_portion: SlotProportion::new(0.5),
-            max_block_proposal_slot_portion: None,
-            telemetry: telemetry.as_ref().map(|x| x.handle()),
-        };
+                        let storage_proof =
+                            sp_transaction_storage_proof::registration::new_data_provider(
+                                &*client_clone,
+                                &parent,
+                            )?;
 
-        let babe = sc_consensus_babe::start_babe(babe_config)?;
-        task_manager.spawn_essential_handle().spawn_blocking(
-            "babe-proposer",
-            Some("block-authoring"),
-            babe,
-        );
+                        Ok((slot, timestamp, storage_proof))
+                    }
+                },
+                force_authoring,
+                backoff_authoring_blocks,
+                babe_link,
+                block_proposal_slot_portion: SlotProportion::new(0.5),
+                max_block_proposal_slot_portion: None,
+                telemetry: telemetry.as_ref().map(|x| x.handle()),
+            };
+
+            let babe = sc_consensus_babe::start_babe(babe_config)?;
+            task_manager.spawn_essential_handle().spawn_blocking(
+                "babe-proposer",
+                Some("block-authoring"),
+                babe,
+            );
+        }
     }
 
     // Spawn authority discovery module.

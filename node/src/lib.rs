@@ -1,6 +1,7 @@
 use ::safer_ffi::prelude::*;
 use safer_ffi::c_int;
 mod service;
+mod sunlead_consensus;
 mod cli;
 mod command;
 mod chain_spec;

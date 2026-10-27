@@ -1,0 +1,31 @@
+[package]
+name = "sunlead-verifier"
+version = "0.1.0"
+license = "MIT-0"
+edition = "2021"
+description = "SunLead no_std header/slot/signature verifier and equivocation proof checker."
+publish = false
+
+[dependencies]
+sunlead-primitives = { path = "../sunlead-primitives", default-features = false }
+sunlead-schedule = { path = "../sunlead-schedule", default-features = false }
+codec = { features = ["derive"], workspace = true }
+sp-core = { default-features = false, workspace = true }
+sp-runtime = { default-features = false, workspace = true }
+sp-consensus-slots = { default-features = false, workspace = true }
+sp-crypto-hashing = { default-features = false, workspace = true }
+
+[dev-dependencies]
+sp-core = { default-features = true, workspace = true }
+
+[features]
+default = ["std"]
+std = [
+	"sunlead-primitives/std",
+	"sunlead-schedule/std",
+	"codec/std",
+	"sp-core/std",
+	"sp-runtime/std",
+	"sp-consensus-slots/std",
+	"sp-crypto-hashing/std",
+]

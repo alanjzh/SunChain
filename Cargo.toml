@@ -20,9 +20,13 @@ members = [
     "pallets/insurance",
     "pallets/liquidation",
     "pallets/oracle",
+    "pallets/sunlead",
     "runtime",
     "langto_binding",
     # "sc-network",
+    "crates/sunlead-primitives",
+    "crates/sunlead-schedule",
+    "crates/sunlead-verifier",
 ]
 resolver = "2"
 default-members = [
@@ -52,6 +56,10 @@ exchange-primitives = { path = "./pallets/exchange-primitives", default-features
 pallet-insurance = { path = "./pallets/insurance", default-features = false }
 pallet-liquidation = { path = "./pallets/liquidation", default-features = false }
 pallet-oracle = { path = "./pallets/oracle", default-features = false }
+pallet-sunlead = { path = "./pallets/sunlead", default-features = false }
+sunlead-primitives = { path = "./crates/sunlead-primitives", default-features = false }
+sunlead-schedule = { path = "./crates/sunlead-schedule", default-features = false }
+sunlead-verifier = { path = "./crates/sunlead-verifier", default-features = false }
 
 # path = "third_party/polkadot-sdk/..."
 asset-hub-rococo-emulated-chain = { path = "third_party/polkadot-sdk/cumulus/parachains/integration-tests/emulated/chains/parachains/assets/asset-hub-rococo" }

@@ -7,6 +7,7 @@ use sp_authority_discovery::AuthorityId as AuthorityDiscoveryId;
 use sp_consensus_babe::AuthorityId as BabeId;
 use sp_consensus_beefy::ecdsa_crypto;
 use sp_consensus_grandpa::AuthorityId as GrandpaId;
+use sunlead_primitives::SunLeadId;
 use sp_core::{
 	crypto::{get_public_from_string_or_panic, CryptoType, Ss58Codec},
 	ed25519, sr25519 as core_sr25519, Pair, H160, } ;
@@ -39,6 +40,7 @@ fn configure_accounts_for_staging_sunchain() -> (
 		BabeId,
 		ImOnlineId,
 		AuthorityDiscoveryId,
+		SunLeadId,
 	)>,
 	AccountId,
 	Vec<AccountId>,
@@ -99,6 +101,7 @@ fn configure_accounts_for_staging_sunchain() -> (
 		BabeId,
 		ImOnlineId,
 		AuthorityDiscoveryId,
+		SunLeadId,
 	)> = vec![
 		// Two validators, because a single-validator chain cannot demonstrate any of the
 		// consensus behaviour — no handover, no equivocation surface — and because `MinSources`
@@ -109,12 +112,14 @@ fn configure_accounts_for_staging_sunchain() -> (
 			sun_admin_slave_ed25519.into(),
 			sun_admin_slave_sr25519.clone().into(),
 			sun_admin_slave_sr25519.clone().into(),
+			sun_admin_slave_sr25519.clone().into(),
 			sun_admin_slave_sr25519.into(),
 		),
 		( 
 			sun_admin_master_account.clone(),
 			sun_admin_master_account.clone().into(),
 			sun_admin_master_ed25519.into(),
+			sun_admin_master_sr25519.clone().into(),
 			sun_admin_master_sr25519.clone().into(),
 			sun_admin_master_sr25519.clone().into(),
 			sun_admin_master_sr25519.into(),       
@@ -150,6 +155,7 @@ fn configure_accounts(
 		BabeId,
 		ImOnlineId,
 		AuthorityDiscoveryId,
+		SunLeadId,
 	)>,
 	initial_nominators: Vec<AccountId>,
 	endowed_accounts: Vec<AccountId>,
@@ -162,6 +168,7 @@ fn configure_accounts(
 		BabeId,
 		ImOnlineId,
 		AuthorityDiscoveryId,
+		SunLeadId,
 	)>,
 	Vec<AccountId>,
 	Vec<Staker>,
@@ -203,12 +210,14 @@ fn session_keys_json(
 	babe: BabeId,
 	im_online: ImOnlineId,
 	authority_discovery: AuthorityDiscoveryId,
+	sunl: SunLeadId,
 ) -> serde_json::Value {
 	serde_json::json!({
 		"authority_discovery": authority_discovery,
 		"babe": babe,
 		"grandpa": grandpa,
 		"im_online": im_online,
+		"sunl": sunl,
 	})
 }
 
@@ -232,6 +241,7 @@ pub fn sunchain_genesis_patch(
 		BabeId,
 		ImOnlineId,
 		AuthorityDiscoveryId,
+		SunLeadId,
 	)>,
 	initial_nominators: Vec<AccountId>,
 	root_key: AccountId,
@@ -267,12 +277,13 @@ pub fn sunchain_genesis_patch(
 					x.0.clone(),
 					// stash account is controller
 					x.0.clone(),
-					session_keys_json(
+							session_keys_json(
 						x.2.clone(),
 						x.3.clone(),
 						x.4.clone(),
 						x.5.clone(),
-					)
+						x.6.clone(),
+						)
 					// x.0.clone(), x.1.clone(), x.2.clone()
 				)
 			})
@@ -358,8 +369,9 @@ pub fn session_keys(
 	babe: BabeId,
 	im_online: ImOnlineId,
 	authority_discovery: AuthorityDiscoveryId,
+	sunl: SunLeadId,
 ) -> SessionKeys {
-	SessionKeys { grandpa, babe, im_online, authority_discovery }
+	SessionKeys { grandpa, babe, im_online, authority_discovery, sunl }
 }
 
 /// We have this method as there is no straight forward way to convert the
@@ -381,6 +393,7 @@ pub fn session_keys_from_seed(seed: &str) -> SessionKeys {
 		// get_public_from_string_or_panic::<ImOnlineId>(seed),
 		// get_public_from_string_or_panic::<AuthorityDiscoveryId>(seed),
 		ed_auth_pair.public().into(),
+		sr_auth_pair.public().into(),
 		sr_auth_pair.public().into(),
 		sr_auth_pair.public().into(),
 		sr_auth_pair.public().into(),

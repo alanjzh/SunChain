@@ -34,6 +34,7 @@ pallet-exchange-core.workspace = true
 pallet-oracle.workspace = true
 pallet-insurance.workspace = true
 pallet-liquidation.workspace = true
+pallet-sunlead.workspace = true
 exchange-primitives.workspace = true
 pallet-transaction-payment-rpc-runtime-api.workspace = true
 pallet-transaction-payment.workspace = true
@@ -54,6 +55,9 @@ sp-session.workspace = true
 sp-storage.workspace = true
 sp-transaction-pool.workspace = true
 sp-version = { features = ["serde"], workspace = true }
+
+sunlead-primitives = { workspace = true, default-features = false }
+sunlead-schedule = { workspace = true, default-features = false }
 
 sp-authority-discovery.workspace = true
 sp-consensus-babe.workspace = true
@@ -126,6 +130,7 @@ std = [
 	"pallet-assets/std",
 	"pallet-exchange-core/std",
 	"pallet-oracle/std",
+	"pallet-sunlead/std",
 	"pallet-insurance/std",
 	"pallet-liquidation/std",
 	"exchange-primitives/std",
@@ -134,6 +139,8 @@ std = [
 	"scale-info/std",
 	"serde_json/std",
 	"sp-api/std",
+	"sunlead-primitives/std",
+	"sunlead-schedule/std",
 	"sp-block-builder/std",
 	"sp-consensus-aura/std",
 	"sp-consensus-grandpa/std",
@@ -195,6 +202,7 @@ runtime-benchmarks = [
 	# polkadot-sdk supports. See docs Phase 1 §11.2.
 	"pallet-exchange-core/runtime-benchmarks",
 	"pallet-oracle/runtime-benchmarks",
+	"pallet-sunlead/runtime-benchmarks",
 	"pallet-insurance/runtime-benchmarks",
 	"sp-runtime/runtime-benchmarks",
 	"pallet-staking/runtime-benchmarks",
@@ -218,6 +226,7 @@ try-runtime = [
 	"pallet-grandpa/try-runtime",
 	"pallet-sudo/try-runtime",
 	"pallet-template/try-runtime",
+	"pallet-sunlead/try-runtime",
 	"pallet-timestamp/try-runtime",
 	"pallet-assets/try-runtime",
 	# Same cfg-mismatch class as `fp-self-contained`: the *implementor* needs the feature, not

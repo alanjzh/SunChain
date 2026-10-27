@@ -455,4 +455,10 @@ mod runtime {
 // (Phase 2 P2-A). Registered here for the first time — until now the core ran on `NoOracle`.
 #[runtime::pallet_index(25)]
 pub type Oracle = pallet_oracle;
+
+// SunLead deterministic-leader consensus (P2): computes & exposes the epoch
+// authority snapshot and stake-weighted schedule. Does NOT change BABE/GRANDPA
+// authoring yet — that is P3. Registered with the next free index (26).
+#[runtime::pallet_index(26)]
+pub type SunLead = pallet_sunlead;
 }

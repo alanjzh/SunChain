@@ -52,6 +52,25 @@ sp_api::decl_runtime_apis! {
             subaccount: u32,
         ) -> alloc::vec::Vec<pallet_exchange_core::types::ActionReceipt>;
     }
+
+    /// SunLead deterministic-leader consensus API (P2).
+    ///
+    /// Exposes the epoch authority snapshot, schedule parameters and the
+    /// per-slot deterministic leader / Merkle proof so the node (P3) can derive
+    /// and verify blocks. During P2 the schedule is computed by `pallet_sunlead`
+    /// at each epoch boundary; BABE/GRANDPA authoring is unchanged.
+    pub trait SunLeadApi {
+        /// Current schedule parameters.
+        fn configuration() -> sunlead_primitives::SunLeadScheduleParams;
+        /// Current epoch authority snapshot (None before the first epoch builds it).
+        fn current_snapshot() -> Option<sunlead_primitives::SunLeadAuthoritySnapshot<AccountId>>;
+        /// The uniquely scheduled leader `(leader_index, window_id)` for `slot`.
+        fn leader_at(slot: u64) -> Option<(u32, sunlead_primitives::WindowId)>;
+        /// Merkle proof for the schedule entry at `slot`.
+        fn schedule_proof(slot: u64) -> Option<sunlead_schedule::SunLeadScheduleProof>;
+        /// Whether SunLead is the currently active authoring consensus.
+        fn is_active() -> bool;
+    }
 }
 
 use sp_api::impl_runtime_apis;
@@ -726,6 +745,28 @@ impl_runtime_apis! {
     impl sp_authority_discovery::AuthorityDiscoveryApi<Block> for Runtime {
         fn authorities() -> Vec<AuthorityDiscoveryId> {
             AuthorityDiscovery::authorities()
+        }
+    }
+
+    impl self::SunLeadApi<Block> for Runtime {
+        fn configuration() -> sunlead_primitives::SunLeadScheduleParams {
+            pallet_sunlead::Pallet::<Runtime>::configuration()
+        }
+
+        fn current_snapshot() -> Option<sunlead_primitives::SunLeadAuthoritySnapshot<AccountId>> {
+            pallet_sunlead::Pallet::<Runtime>::current_snapshot()
+        }
+
+        fn leader_at(slot: u64) -> Option<(u32, sunlead_primitives::WindowId)> {
+            pallet_sunlead::Pallet::<Runtime>::leader_at(slot)
+        }
+
+        fn schedule_proof(slot: u64) -> Option<sunlead_schedule::SunLeadScheduleProof> {
+            pallet_sunlead::Pallet::<Runtime>::schedule_proof(slot)
+        }
+
+        fn is_active() -> bool {
+            pallet_sunlead::Pallet::<Runtime>::is_active()
         }
     }
 
