@@ -16,32 +16,18 @@ P3 的节点门控**在启动时读 genesis block 0 的 `is_active`**。而 runt
 
 ---
 
-## Phase 0 — 让 SunLead 在 genesis 可激活（一次性代码改动）
+## Phase 0 — 让 SunLead 在 genesis 可激活 ✅ 已实施
 
-给 `pallet-sunlead` 增加 `GenesisConfig`，并在 dev/测试 chain-spec 里置 `true`。
+已落地（commit 见 P3 work log）：
 
-1. `pallets/sunlead/src/lib.rs` 增加：
-   ```rust
-   #[pallet::genesis_config]
-   #[derive(Default)]
-   pub struct GenesisConfig<T: Config> {
-       pub sunlead_active: bool,
-       #[serde(skip)]
-       pub _phantom: sp_std::marker::PhantomData<T>,
-   }
+1. `pallets/sunlead/src/lib.rs`：新增 `#[pallet::genesis_config] GenesisConfig { sunlead_active: bool }` + `#[pallet::genesis_build]`。`build()` 里：
+   - `SunLeadActive::put(self.sunlead_active)`；
+   - 额外调用 `build_current_snapshot(0)` 在 genesis 把 epoch-0 的 authority 快照 + schedule 一并建好——因为 `on_initialize` 在 genesis 区块**不执行**，否则首块（block 1）的 `claim_slot` 读不到快照会死锁。错误被忽略（`let _ = ...`），BABE 在 SunLead 不激活时仍可用。
+2. `node/src/chain_spec.rs`：`development_config_genesis_json()`（即 `--chain dev`）补 `"sunLead": { "sunLeadActive": true }`，并把权威集从单 Alice 扩为 **Alice + Bob** 两个验证人，使 dev 规格支持 2 节点验证网络。
+3. 主网规格（`sunchain` preset）**未**添加该字段 → 默认 `false`，仍走 BABE。
+4. 字段名经验证：`build-spec --chain dev` 成功且 patch 中含 `sunLead/sunLeadActive`（宏自带 `deny_unknown_fields`，名字错会直接报错而非静默丢弃）。
 
-   #[pallet::genesis_build]
-   impl<T: Config> GenesisBuild<T> for GenesisConfig<T> {
-       fn build(&self) {
-           SunLeadActive::<T>::put(self.sunlead_active);
-       }
-   }
-   ```
-2. `runtime/src/lib.rs` 的 `GenesisConfig` 组装里补 `sunlead: pallet_sunlead::GenesisConfig { sunlead_active: true }`（仅 dev/test chain-spec 置 `true`，主网默认 `false`）。
-3. `node/src/chain_spec.rs` 的 `testnet_genesis` 对应位置补 `sunlead: Default::default()`（或显式 `sunlead_active: true`）。
-4. 重新 `cargo build`（runtime 变了 → 旧库必须 `--fresh` 清掉，见记忆 P0）。
-
-> 备用（更快但更脏）：临时把 `pallet_sunlead::is_active()` 实现改成 `true` 做冒烟测试，验证后再还原。不推荐进主干。
+> 注意：dev 现在含 2 个验证人。单节点 `--dev`（只有 Alice 在线）时 GRANDPA 因需要 2/3 票而无法终局（仍能出块、导入），这是已知取舍；2 节点测试两节点都在线则正常终局。
 
 ---
 
@@ -80,6 +66,9 @@ cargo build --release -p sunchain        # 或 debug，取决于机器
   --fresh
 ```
 （`A的peer-id` 从 A 启动日志 `Local node identity is: <peer-id>` 取。）
+
+> `sunl` 会话密钥**无需手动注入**：`--alice`/`--bob` 会经 `sp_session::generate_initial_session_keys` 用 `//Alice`/`//Bob` 种子为 Runtime `SessionKeys` 里的**所有**密钥类型（含 `sunl`）生成并写入 keystore，且 dev genesis 把同样的 `//Alice`/`//Bob` 公钥注册为 session 密钥，二者一致，`claim_slot` 即可签名。
+> dev 规格现含 Alice + Bob 两个验证人，故两节点都在线时 GRANDPA 可正常终局。
 
 ---
 

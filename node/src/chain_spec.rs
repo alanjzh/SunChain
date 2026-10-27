@@ -224,6 +224,12 @@ pub fn testnet_genesis(
         "babe": {
             "epochConfig": BABE_GENESIS_EPOCH_CONFIG,
         },
+        // Phase 0: activate SunLead as the authoring consensus at genesis so the node's
+        // startup gate (which reads `is_active` at block 0) picks the SunLead import
+        // queue + authoring path. Set to `false` (or omit) to keep BABE.
+        "sunLead": {
+            "sunLeadActive": true,
+        },
         // "nominationPools": {
         //     "minCreateBond": 10 * UNIT,
         //     "minJoinBond": 1 * UNIT,
@@ -282,6 +288,27 @@ pub fn authority_keys_from_alice() -> (
     )
 }
 
+pub fn authority_keys_from_bob() -> (
+    AccountId,
+    AccountId,
+    GrandpaId,
+    BabeId,
+    ImOnlineId,
+    AuthorityDiscoveryId,
+    SunLeadId,
+) {
+    let seed = "Bob";
+    (
+        Keyring::Baltathar.into(),
+        Keyring::Baltathar.into(),
+        get_from_seed::<GrandpaId>(seed),
+        get_from_seed::<BabeId>(seed),
+        get_from_seed::<ImOnlineId>(seed),
+        get_from_seed::<AuthorityDiscoveryId>(seed),
+        get_from_seed::<SunLeadId>(seed),
+    )
+}
+
 
 
 fn development_config_genesis_json() -> serde_json::Value {
@@ -290,10 +317,10 @@ fn development_config_genesis_json() -> serde_json::Value {
 		(Keyring::Baltathar.into(), 100_000_000 * UNIT)
 		];
     testnet_genesis(
-        vec![authority_keys_from_alice()],
+        vec![authority_keys_from_alice(), authority_keys_from_bob()],
         vec![],
         Keyring::Alith.into(),
-        Some(vec![Keyring::Alith.into()]),
+        Some(vec![Keyring::Alith.into(), Keyring::Baltathar.into()]),
         extra_endowed_accounts_balance,
         42u32,
     )

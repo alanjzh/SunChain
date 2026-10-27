@@ -112,6 +112,36 @@ pub mod pallet {
 	#[pallet::storage]
 	pub type SunLeadActive<T> = StorageValue<_, bool, ValueQuery>;
 
+	/// Genesis configuration for `pallet-sunlead`.
+	///
+	/// Lets a chain spec decide whether SunLead is the active authoring consensus at
+	/// genesis (the node's startup gate reads `is_active` at block 0, so the flag must
+	/// be set here — flipping it later via `set_sunlead_active` does not retroactively
+	/// switch the already-chosen import queue/authorer). The initial authority snapshot
+	/// + schedule are also built here because `on_initialize` does not run on the
+	/// genesis block, yet the first SunLead-authored block needs the snapshot to exist
+	/// at the genesis state.
+	#[derive(frame_support::DefaultNoBound)]
+	#[pallet::genesis_config]
+	pub struct GenesisConfig<T: Config> {
+		/// Whether SunLead is the active authoring consensus at genesis.
+		pub sunlead_active: bool,
+		#[serde(skip)]
+		pub _phantom: core::marker::PhantomData<T>,
+	}
+
+	#[pallet::genesis_build]
+	impl<T: Config> BuildGenesisConfig for GenesisConfig<T> {
+		fn build(&self) {
+			SunLeadActive::<T>::put(self.sunlead_active);
+			// Best-effort: build the epoch-0 snapshot + schedule so the very first
+			// SunLead-authored block can derive its leader. Ignore failure (e.g. a
+			// validator without a `sunl` key) so genesis never hard-fails the chain —
+			// BABE still works when SunLead is inactive.
+			let _ = Pallet::<T>::build_current_snapshot(0);
+		}
+	}
+
 	#[pallet::event]
 	#[pallet::generate_deposit(pub(super) fn deposit_event)]
 	pub enum Event<T: Config> {

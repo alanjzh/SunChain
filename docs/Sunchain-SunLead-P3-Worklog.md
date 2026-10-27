@@ -95,6 +95,6 @@ P3 不实现 slash 接入 `pallet-offences`、不做动态 handoff 的运行时�
 
 ## 6. 下一步建议
 
-1. 给 `pallet-sunlead` 增加 `GenesisConfig`（或 dev chain-spec flag）预置 `SunLeadActive = true`，使 2 节点 e2e 能真正以 SunLead 出块（见 `Sunchain-SunLead-P3-TestPlan.md`）。
+1. ~~给 `pallet-sunlead` 增加 `GenesisConfig`（或 dev chain-spec flag）预置 `SunLeadActive = true`~~ **已完成（Phase 0）**：`pallet-sunlead` 新增 `GenesisConfig { sunlead_active }`，`dev` chain-spec 置 `true` 并把权威集扩为 Alice+Bob；主网 preset 不动（默认 `false`）。同时 `build()` 里额外建了 epoch-0 快照，修复 genesis 区块不跑 `on_initialize` 导致的首块死锁。详见 `Sunchain-SunLead-P3-TestPlan.md` 的 Phase 0。
 2. 实施 `Sunchain-SunLead-P3-TestPlan.md` 中的 2 节点验证流程，覆盖：runtime API 正确性、SunLead 出块 + 双节点同步 + GRANDPA 终局性、回退到 BABE。
 3. P4：接 `pallet-offences` 实现 slash；P5：真正的共识 handoff（含动态切换）。
