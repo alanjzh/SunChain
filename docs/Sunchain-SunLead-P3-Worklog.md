@@ -98,3 +98,44 @@ P3 不实现 slash 接入 `pallet-offences`、不做动态 handoff 的运行时�
 1. ~~给 `pallet-sunlead` 增加 `GenesisConfig`（或 dev chain-spec flag）预置 `SunLeadActive = true`~~ **已完成（Phase 0）**：`pallet-sunlead` 新增 `GenesisConfig { sunlead_active }`，`dev` chain-spec 置 `true` 并把权威集扩为 Alice+Bob；主网 preset 不动（默认 `false`）。同时 `build()` 里额外建了 epoch-0 快照，修复 genesis 区块不跑 `on_initialize` 导致的首块死锁。详见 `Sunchain-SunLead-P3-TestPlan.md` 的 Phase 0。
 2. 实施 `Sunchain-SunLead-P3-TestPlan.md` 中的 2 节点验证流程，覆盖：runtime API 正确性、SunLead 出块 + 双节点同步 + GRANDPA 终局性、回退到 BABE。
 3. P4：接 `pallet-offences` 实现 slash；P5：真正的共识 handoff（含动态切换）。
+
+---
+
+## 7. 收尾：node/runtime 接线完成 + dev 会话密钥注入 + 2 节点 e2e 验证（2026-10-28）
+
+> 日期：2026-10-28
+> 内容：补齐 SunLead 在 runtime/node 的收尾接线、修复 dev 节点 keystore 缺会话密钥（根因2 / 决策A）、并以 2 节点（dev Alice+Bob、staging master+slave）完成 SunLead 出块 + GRANDPA 终局的端到端验证。已提交 `7359d3f`。
+
+### 7.1 本轮补齐的代码改动（已提交 `7359d3f`）
+
+- **runtime `configs/mod.rs`**：新增 `SunLeadAwareOnTimestampSet`，在 `SunLeadActive` 为 `true` 时把 `Babe::CurrentSlot` 从 timestamp slot 同步，而不是 `assert_eq` 相等。原因：BABE 的 `OnTimestampSet` 断言 `Babe::CurrentSlot == timestamp_slot`，但 SunLead 出块走 SunLead verifier、从不动 `CurrentSlot`，会触发断言 panic；SunLead 接管后即改为同步。
+- **node `chain_spec.rs` / `initial_config.rs`**：修正 storage 字段大小写 `sunLeadActive` → `sunleadActive`（与 `pallet-sunlead::GenesisConfig` 字段一致）；并在 staging `sunchain` 规格的 `sunchain_genesis_patch` 里也置 `sunleadActive: true`，使 `--chain sunchain` 启动即选 SunLead 导入队列/出块路径（之前以为 staging 默认不激活，现已确认 dev 与 staging 都激活）。
+- **node `sunlead_consensus/*`（block_import / import_queue / worker）+ `rpc/mod.rs` + `crates/sunlead-verifier`**：补齐与 P3 草接线配套的导入校验 / 出块校验与 RPC plumbing。
+- **node `service.rs`：dev 会话密钥注入（根因2 修复 / 决策A）**。新增 `inject_dev_session_keys`：在 `new_partial` 启动阶段，按 `config.dev_key_seed`（缺省回退到 dev chain 的 `//Alice`）显式 `sr25519_generate_new` / `ed25519_generate_new` 注入全部 5 类会话密钥（babe / gran / imon / audi / sunl）。
+  - 根因：`--chain dev` 单独启动（无 `--alice/--bob/--dev`）时 `config.dev_key_seed` 为空，`sc_service::spawn_tasks` 的 `generate_initial_session_keys` 直接 no-op，导致 keystore 既无 `sunl`（无法出块）也无 `gran`（无法终局）。以前只能手动 `author_insertKey` 绕开。
+  - 只改 node 原生代码，**不动 runtime**，无需重编 WASM / `--fresh`。仅注入本节点种子，避免跨节点同一 leader 槽 equivocation。
+
+### 7.2 验证（2 节点）
+
+| 检查 | dev（Alice+Bob，`/tmp`） | staging（master+slave，`chain_data`） |
+|------|------|------|
+| `is_active = true` / `starting SunLead authoring` | ✅ | ✅ |
+| 区块 digest | `PreRuntime(sunl)` + `Seal(sunl)`，**无 babe**（`0x62616230`） | 同 |
+| 两节点都出块 | Alice / Bob 各 ~257 次 `Prepared block` | master / slave 各 14+ 次 |
+| GRANDPA 终局 | 稳定推进到 **#489** | 稳定推进到 **#24+** |
+| equivocation / panic / BadProof | 无 | 无 |
+
+- **关键澄清**：之前"gran 不能终结（卡 `finalized #0`）"**不是 SunLead 路径的独立 bug**，而是单节点（genesis 含 2 验证人但仅 1 在线）2/3 多数不达的假象；两节点都在线且 grandpa 密钥就位后正常终局。
+- **staging 验证方式**：复用 `chain_data/master/base`、`chain_data/slave/base` 现成 keystore（已含 audi/babe/imon/sunl/gran 五类密钥），只清 `db` + `frontier`、保留 `keystore` 与 `network`；**不**用 `--alice/--bob`（会把 `//Alice` 混入，破坏与 genesis 的匹配并引发 equivocation）。staging 验证人 master/slave 的 sr25519 与 ed25519 共用同一 seed（master=`0x74e2…` / slave=`0x2671…`）。
+- 早期 leader 槽由 epoch 排列种子决定（非固定索引）：本次 staging 早期槽归 slave(idx0)，master 单节点会 idle；必须两节点都在线才有块且 GRANDPA 能终局。
+
+### 7.3 "premium vote rejected: Already imported" 是什么
+
+- 来源：`node/src/premium_feed.rs:120`（`premium vote rejected`）与 `node/src/oracle_feed.rs:352`（`vote rejected`）。
+- 机制：链下喂价守护进程（service.rs 起的 `premium-votes` 与 oracle feed）每块把确定性相同的 `submit_premium_votes` / `submit_prices` 外因塞进交易池；≥2 验证节点都提交同一条确定性投票，第二个撞上"已在池中" → `Already imported`；变体 `Too low priority (9223372036854775807 > 9223372036854775807)` 是双方同 nonce 投票、池子留先到者拒后到者。
+- 结论：**良性去重噪声**，投票仍会入块一次，不影响喂价/共识。≥2 验证人时必现，可忽略；要消噪可在 feeder 先查 pending 去重。
+
+### 7.4 下一步
+
+- P4：接 `pallet-offences` 实现 slash；P5：真正的共识 handoff（动态切换）。
+- 完善 DEX 端到端（fund / price / place / match）验证仍待做（见后续日志）。
