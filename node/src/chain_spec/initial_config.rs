@@ -315,6 +315,12 @@ pub fn sunchain_genesis_patch(
 			// 	.collect::<Vec<_>>(),
 			"epochConfig": BABE_GENESIS_EPOCH_CONFIG,
 		},
+		// Activate SunLead as the authoring consensus at genesis so the node's startup
+		// gate (which reads `is_active` at block 0) picks the SunLead import queue +
+		// authoring path. Without this the flag defaults to `false` and BABE is used.
+		"sunLead": {
+			"sunleadActive": true,
+		},
 		"evmChainId": { "chainId": 42u32 }
 	});
 	crate::chain_spec::dex_genesis::merge_dex_genesis(&mut genesis, oracle_sources, vec![0, 1, 2, 3]);

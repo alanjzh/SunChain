@@ -15,6 +15,8 @@ use sp_blockchain::HeaderBackend;
 use sp_consensus::Error as ConsensusError;
 use sp_core::H256;
 use sp_runtime::traits::Header as HeaderT;
+use sp_runtime::DigestItem;
+use scale_codec::Encode;
 use std::sync::Arc;
 use sunchain_runtime::apis::SunLeadApi;
 use sunchain_runtime::opaque::Block;
@@ -94,6 +96,11 @@ where
 		mut block: BlockImportParams<Block>,
 	) -> Result<BlockImportParams<Block>, String> {
 		let header = block.header.clone();
+		// The genesis block carries no SunLead pre-digest (it is not authored by the
+		// schedule). Pass it through untouched so the underlying import can finalize it.
+		if *header.number() == 0 {
+			return Ok(block);
+		}
 		let pre_digest =
 			find_sunlead_pre_digest(&header).map_err(|e| e.to_string())?;
 		let parent_hash = *header.parent_hash();
@@ -143,6 +150,29 @@ where
 					.map_err(|e| format!("sunlead: slot monotonicity violated: {:?}", e))?;
 			}
 		}
+
+		// Move the SunLead seal out of the header's digest and into `post_digests`.
+		//
+		// When a remote (gossiped) block is imported, the runtime re-executes the
+		// block from the *pre-seal* header and re-deposits the runtime-driven logs
+		// (in particular the Frontier `fron` PostLog written by
+		// `pallet_ethereum::store_block`). `Executive::final_checks` then asserts
+		// the header's digest equals the digest the runtime computed. The recomputed
+		// digest only carries the PreRuntime item (the seal is stripped by
+		// `Executive::extract_pre_digest`) plus the runtime-deposited logs — so it
+		// has one fewer item than the full header, which still carries the Seal. The
+		// mismatch (`left: 3, right: 2`) panics and prevents the block from being
+		// imported, which in turn starves GRANDPA.
+		//
+		// The BABE verifier does exactly this relocation (`block.header` loses the
+		// seal, `block.post_digests` gains it) so that the runtime sees a pre-seal
+		// header whose digest matches its own recomputation. We mirror it here.
+		// Local authoring never reaches this verifier and already places the seal in
+		// `post_digests`, so this branch is a no-op for own blocks.
+		block.header.digest_mut().logs.retain(
+			|log| log.seal_try_to::<sunlead_primitives::SunLeadSignature>(&SUNLEAD_ENGINE_ID).is_none(),
+		);
+		block.post_digests.push(DigestItem::Seal(SUNLEAD_ENGINE_ID, seal.encode()));
 
 		debug!(target: "sunlead", "verified SunLead pre-digest for slot {}", slot);
 		Ok(block)

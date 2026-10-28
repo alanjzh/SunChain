@@ -6,6 +6,7 @@
 //! so the `SunLeadBlockImport` itself just delegates import/check to the inner
 //! import.
 
+use sc_consensus::block_import::ForkChoiceStrategy;
 use sc_consensus::{BlockImport as BlockImportT, BlockImportParams, ImportResult};
 use sp_consensus::Error as ConsensusError;
 use sp_runtime::traits::Block as BlockT;
@@ -50,8 +51,16 @@ where
 
 	async fn import_block(
 		&self,
-		block: BlockImportParams<B>,
+		mut block: BlockImportParams<B>,
 	) -> Result<ImportResult, Self::Error> {
+		// Unlike the BABE path (whose `BabeBlockImport` sets the fork choice),
+		// the SunLead path has no authority block import to fill in
+		// `fork_choice`. If it reaches the bottom `Client` importer as `None`
+		// the import fails with `IncompletePipeline` and every authored block
+		// is rejected. Set the standard solo-chain rule here.
+		if block.fork_choice.is_none() {
+			block.fork_choice = Some(ForkChoiceStrategy::LongestChain);
+		}
 		self.inner.import_block(block).await.map_err(Into::into)
 	}
 }

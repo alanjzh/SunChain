@@ -75,7 +75,7 @@ use sp_runtime::traits::{
 /// Extra dependencies for BABE.
 pub struct BabeDeps {
     /// A handle to the BABE worker for issuing requests.
-    pub babe_worker_handle: BabeWorkerHandle<Block>,
+    pub babe_worker_handle: Option<BabeWorkerHandle<Block>>,
     /// The keystore that manages the keys of the node.
     pub keystore: KeystorePtr,
 }
@@ -261,16 +261,6 @@ where
         babe_worker_handle,
     } = babe;
     io.merge(
-        Babe::new(
-            client.clone(),
-            babe_worker_handle.clone(),
-            keystore,
-            select_chain,
-            // deny_unsafe,
-        )
-        .into_rpc(),
-    )?;
-    io.merge(
         Grandpa::new(
             subscription_executor,
             shared_authority_set.clone(),
@@ -280,16 +270,29 @@ where
         )
         .into_rpc(),
     )?;
-
-    io.merge(
-        SyncState::new(
-            chain_spec,
-            client.clone(),
-            shared_authority_set,
-            babe_worker_handle,
-        )?
-        .into_rpc(),
-    )?;
+    // The BABE worker handle only exists when BABE is the active authoring consensus.
+    // When SunLead is active (no BABE worker), skip the BABE/SyncState RPC extensions.
+    if let Some(bh) = babe_worker_handle {
+        io.merge(
+            Babe::new(
+                client.clone(),
+                bh.clone(),
+                keystore,
+                select_chain,
+                // deny_unsafe,
+            )
+            .into_rpc(),
+        )?;
+        io.merge(
+            SyncState::new(
+                chain_spec,
+                client.clone(),
+                shared_authority_set,
+                bh,
+            )?
+            .into_rpc(),
+        )?;
+    }
 
     // io.merge(StateMigration::new(client.clone(), backend, deny_unsafe).into_rpc())?;
     // io.merge(Dev::new(client, deny_unsafe).into_rpc())?;

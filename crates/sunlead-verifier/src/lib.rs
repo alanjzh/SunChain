@@ -98,14 +98,17 @@ pub fn verify_pre_digest(
 		build_schedule(&input).map_err(|_| SunLeadVerificationError::ScheduleBuildFailed)?;
 
 	let slot = u64::from(digest.0.slot);
-	if slot >= params.epoch_slots {
+	// The digest stores the absolute runtime slot; the schedule is defined per-epoch as
+	// `slot % epoch_slots`, so map into the current epoch before deriving the leader.
+	let rel_slot = slot % params.epoch_slots;
+	if rel_slot >= params.epoch_slots {
 		return Err(SunLeadVerificationError::SlotOutOfRange)
 	}
 	if sched.root != digest.0.schedule_root {
 		return Err(SunLeadVerificationError::ScheduleRootMismatch)
 	}
 	let (leader, window) = sched
-		.leader_at(slot)
+		.leader_at(rel_slot)
 		.ok_or(SunLeadVerificationError::SlotOutOfRange)?;
 	if leader != digest.0.leader_index || window != digest.0.window_id {
 		return Err(SunLeadVerificationError::LeaderMismatch)

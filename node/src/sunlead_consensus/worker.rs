@@ -168,8 +168,12 @@ where
 		slot: Slot,
 		aux: &Self::AuxData,
 	) -> Option<Self::Claim> {
-		debug!(target: "sunlead", "attempting to claim slot {}", slot);
-		let (leader_index, window_id) = aux.schedule.leader_at(slot.into())?;
+		// The runtime slot clock is absolute (anchored to the Unix epoch), but the
+		// SunLead schedule and its verification are defined per-epoch as
+		// `slot % epoch_slots`. Map the absolute slot into the current epoch.
+		let rel_slot = Slot::from(*slot % aux.params.epoch_slots);
+		debug!(target: "sunlead", "attempting to claim slot {} (epoch-relative {})", slot, rel_slot);
+		let (leader_index, window_id) = aux.schedule.leader_at(rel_slot.into())?;
 		let leader_id = aux.context.authorities.get(leader_index as usize)?.0.clone();
 
 		// Only claim if this node controls the scheduled leader's `sunl` key.

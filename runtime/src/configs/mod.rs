@@ -131,11 +131,32 @@ impl frame_system::Config for Runtime {
 // 	type EquivocationReportSystem = ();
 // }
 
+/// BABE's `OnTimestampSet` asserts `Babe::CurrentSlot == timestamp_slot`. The BABE import
+/// verifier keeps `CurrentSlot` in sync for BABE-authored blocks, but SunLead blocks are
+/// imported through the SunLead verifier, which never touches `Babe::CurrentSlot`. When SunLead
+/// is the active consensus we therefore sync it from the timestamp slot instead of asserting.
+pub struct SunLeadAwareOnTimestampSet;
+impl OnTimestampSet<u64> for SunLeadAwareOnTimestampSet {
+	fn on_timestamp_set(moment: u64) {
+		let slot_duration = Babe::slot_duration();
+		let timestamp_slot = sp_consensus_babe::Slot::from(moment / slot_duration);
+		if pallet_sunlead::SunLeadActive::<Runtime>::get() {
+			pallet_babe::CurrentSlot::<Runtime>::put(timestamp_slot);
+		} else {
+			assert_eq!(
+				pallet_babe::CurrentSlot::<Runtime>::get(),
+				timestamp_slot,
+				"Timestamp slot must match `CurrentSlot`"
+			);
+		}
+	}
+}
+
 impl pallet_timestamp::Config for Runtime {
 	/// A timestamp: milliseconds since the unix epoch.
 	type Moment = u64;
 	// type OnTimestampSet = Aura;
-	type OnTimestampSet = Babe;
+	type OnTimestampSet = SunLeadAwareOnTimestampSet;
 	type MinimumPeriod = ConstU64<{ SLOT_DURATION / 2 }>;
 	type WeightInfo = ();
 }

@@ -228,7 +228,7 @@ pub fn testnet_genesis(
         // startup gate (which reads `is_active` at block 0) picks the SunLead import
         // queue + authoring path. Set to `false` (or omit) to keep BABE.
         "sunLead": {
-            "sunLeadActive": true,
+            "sunleadActive": true,
         },
         // "nominationPools": {
         //     "minCreateBond": 10 * UNIT,
@@ -314,13 +314,14 @@ pub fn authority_keys_from_bob() -> (
 fn development_config_genesis_json() -> serde_json::Value {
     let extra_endowed_accounts_balance = vec![
 		// (Keyring::Alith.into(), 100_000_000_000_000 * UNIT),
-		(Keyring::Baltathar.into(), 100_000_000 * UNIT)
+		// NOTE: Baltathar is now an authority, so it is auto-endowed via `configure_accounts`.
+		// Adding it here too would duplicate its balance entry and trip the genesis assert.
 		];
     testnet_genesis(
         vec![authority_keys_from_alice(), authority_keys_from_bob()],
         vec![],
         Keyring::Alith.into(),
-        Some(vec![Keyring::Alith.into(), Keyring::Baltathar.into()]),
+        Some(vec![Keyring::Alith.into()]),
         extra_endowed_accounts_balance,
         42u32,
     )

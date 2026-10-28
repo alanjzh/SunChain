@@ -48,7 +48,29 @@ use crate::sunlead_consensus::{
 	start_sunlead, sunlead_import_queue, SunLeadBlockImport, SunLeadParams,
 };
 use sp_api::ProvideRuntimeApi;
+use sp_core::crypto::KeyTypeId;
 use sunchain_runtime::apis::SunLeadApi;
+
+/// Ensure the well-known dev session keys (babe/grandpa/imon/audi/sunl) for `seed`
+/// (e.g. `//Alice`) are present in the keystore.
+///
+/// Substrate only seeds the keystore from `config.dev_key_seed` inside
+/// `sc_service::spawn_tasks` via `sp_session::generate_initial_session_keys`. When
+/// that field is empty (e.g. a `--chain dev` node started without
+/// `--alice`/`--bob`/`--dev`, or any dev plumbing gap) the keys are never
+/// written — leaving the node without the `sunl` key it needs to author SunLead
+/// blocks and without the `gran` key GRANDPA needs to vote, so the chain authors
+/// blocks but never finalizes. We inject them explicitly at startup so a dev node
+/// is always ready to author and finalize, regardless of how the dev seed was (or
+/// wasn't) plumbed through `Configuration`.
+fn inject_dev_session_keys(keystore: &sp_keystore::KeystorePtr, seed: &str) {
+	let _ = keystore.sr25519_generate_new(KeyTypeId(*b"babe"), Some(seed));
+	let _ = keystore.ed25519_generate_new(KeyTypeId(*b"gran"), Some(seed));
+	let _ = keystore.sr25519_generate_new(KeyTypeId(*b"imon"), Some(seed));
+	let _ = keystore.sr25519_generate_new(KeyTypeId(*b"audi"), Some(seed));
+	let _ = keystore.sr25519_generate_new(sunlead_primitives::KEY_TYPE, Some(seed));
+	log::info!(target: "sunchain", "injected dev session keys (seed {}) into keystore", seed);
+}
 
 use fc_storage::StorageOverrideHandler;
 use sp_core::H256;
@@ -160,7 +182,7 @@ pub fn new_partial<NB>(
                 sc_consensus_babe::BabeLink<Block>,
             ),
             Option<Telemetry>,
-			BabeWorkerHandle<Block>,
+			Option<BabeWorkerHandle<Block>>,
             bool,
             FullSunLeadBlockImport,
         ),
@@ -191,6 +213,27 @@ where
         executor,
     )?;
     let client = Arc::new(client);
+
+    // --- Dev session-key injection (root-cause 2 fix / decision A) ---
+    // Make sure the dev node's keystore holds the session keys the genesis
+    // registered (babe/grandpa/imon/audi/sunl), so it can both author SunLead
+    // blocks (sunl) and vote in GRANDPA (gran). `spawn_tasks` only does this when
+    // `config.dev_key_seed` is set; we cover the gap (and dev chains started
+    // without `--alice`/`--bob`/`--dev`) and inject only the local node's seed to
+    // avoid cross-node equivocation.
+    {
+        let dev_seed = config
+            .dev_key_seed
+            .clone()
+            .or_else(|| {
+                use sc_chain_spec::ChainSpec as _;
+                (config.chain_spec.chain_type() == sc_chain_spec::ChainType::Development)
+                    .then(|| "//Alice".to_string())
+            });
+        if let Some(seed) = dev_seed {
+            inject_dev_session_keys(&keystore_container.keystore(), &seed);
+        }
+    }
 
     let telemetry = telemetry.map(|(worker, telemetry)| {
         task_manager
@@ -272,34 +315,10 @@ where
     // 		compatibility_mode: Default::default(),
     // 	})?;
 
-    let (import_queue, babe_worker_handle) =
-        sc_consensus_babe::import_queue(sc_consensus_babe::ImportQueueParams {
-            link: babe_link.clone(),
-            block_import: babe_block_import.clone(),
-            justification_import: Some(Box::new(justification_import.clone())),
-            client: client.clone(),
-            select_chain: select_chain.clone(),
-            create_inherent_data_providers: move |_, ()| async move {
-                let timestamp = sp_timestamp::InherentDataProvider::from_system_time();
-
-                let slot =
-				sp_consensus_babe::inherents::InherentDataProvider::from_timestamp_and_slot_duration(
-					*timestamp,
-					slot_duration,
-				);
-
-                Ok((slot, timestamp))
-            },
-            spawner: &task_manager.spawn_essential_handle(),
-            registry: config.prometheus_registry(),
-            telemetry: telemetry.as_ref().map(|x| x.handle()),
-            offchain_tx_pool_factory: OffchainTransactionPoolFactory::new(transaction_pool.clone()),
-        })?;
-
     // --- SunLead parallel consensus (gated, BABE remains the default) ---
-    // The SunLead import queue wraps the Frontier -> GRANDPA import chain and runs
-    // the same verifier as the import path. Which queue is actually used for the
-    // network is decided below based on the runtime activation flag.
+    // Only build the import queue that is actually used. Constructing BOTH unconditionally
+    // spawns a `basic-block-import-worker` essential task for the unused one, which is then
+    // dropped and tears the whole service down at genesis.
     let sunlead_block_import = SunLeadBlockImport::new(frontier_block_import.clone());
     let genesis_hash = client
         .block_hash(0)
@@ -309,16 +328,46 @@ where
     let sunlead_api = sp_api::ProvideRuntimeApi::runtime_api(client.as_ref());
     let use_sunlead =
         sunchain_runtime::apis::SunLeadApi::is_active(&*sunlead_api, genesis_hash).unwrap_or(false);
-    let sunlead_import_queue = sunlead_import_queue(
-        sunlead_block_import.clone(),
-        client.clone(),
-        Some(Box::new(justification_import.clone())),
-        genesis_hash,
-        &task_manager.spawn_essential_handle(),
-        config.prometheus_registry(),
-    );
     log::info!(target: "sunlead", "SunLead activation flag (is_active) = {}", use_sunlead);
-    let import_queue = if use_sunlead { sunlead_import_queue } else { import_queue };
+
+    let (import_queue, babe_worker_handle): (
+        sc_consensus::import_queue::BasicQueue<Block>,
+        Option<BabeWorkerHandle<Block>>,
+    ) = if use_sunlead {
+        let iq = sunlead_import_queue(
+            sunlead_block_import.clone(),
+            client.clone(),
+            Some(Box::new(justification_import.clone())),
+            genesis_hash,
+            &task_manager.spawn_essential_handle(),
+            config.prometheus_registry(),
+        );
+        (iq, None)
+    } else {
+        let (iq, bh) = sc_consensus_babe::import_queue(sc_consensus_babe::ImportQueueParams {
+            link: babe_link.clone(),
+            block_import: babe_block_import.clone(),
+            justification_import: Some(Box::new(justification_import.clone())),
+            client: client.clone(),
+            select_chain: select_chain.clone(),
+            create_inherent_data_providers: move |_, ()| async move {
+                let timestamp = sp_timestamp::InherentDataProvider::from_system_time();
+
+                let slot =
+					sp_consensus_babe::inherents::InherentDataProvider::from_timestamp_and_slot_duration(
+						*timestamp,
+						slot_duration,
+					);
+
+                Ok((slot, timestamp))
+            },
+            spawner: &task_manager.spawn_essential_handle(),
+            registry: config.prometheus_registry(),
+            telemetry: telemetry.as_ref().map(|x| x.handle()),
+            offchain_tx_pool_factory: OffchainTransactionPoolFactory::new(transaction_pool.clone()),
+        })?;
+        (iq, Some(bh))
+    };
 
     // let PartialComponents {
     // 	client,
