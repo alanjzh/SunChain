@@ -138,4 +138,47 @@ P3 不实现 slash 接入 `pallet-offences`、不做动态 handoff 的运行时�
 ### 7.4 下一步
 
 - P4：接 `pallet-offences` 实现 slash；P5：真正的共识 handoff（动态切换）。
-- 完善 DEX 端到端（fund / price / place / match）验证仍待做（见后续日志）。
+- 完善 DEX 端到端（fund / price / place / match）验证已在 §8 完成。
+
+---
+
+## 8. 完善 DEX 端到端验证（2026-10-28，跑在 SunLead 链上）
+
+> 目标：在已激活 SunLead 的 staging 链上，跑通 `sunchain-dex-e2e` skill 的完整 DEX 闭环，并核实链上状态（而非只信"accepted/Ok"）。
+
+### 8.1 起链与网络
+
+- 本机无直接外网出口，喂价必须经代理：`source scripts/proxy_env.sh`（`HTTP_PROXY=http://172.21.144.1:8001`）。节点须在**带代理环境变量**的进程里启动，否则 oracle feed 拉不到 Binance/OKX，日志报 `no price for market N`。
+- 两节点 master(RPC 9944 / p2p 30333)、slave(RPC 9945 / p2p 30334)，复用 `chain_data/{master,slave}/base` 的现成 keystore（含 audi/babe/imon/sunl/gran）。`dex_flow.py` 只连 master 9944。
+
+### 8.2 踩坑：复用被中途杀掉的旧 DB 会 panic
+
+- 现象：直接复用之前运行中被 `pkill` 中途杀掉的节点留下的 DB，启动时直接 panic：
+  `finalized header must be valid; valid blocks have a pre-digest; qed: NoPreRuntimeDigest`（`babe/src/lib.rs:1713`）。根因：BABE 终局证明层读 `finalized head` 期望 babe 摘要，而 SunLead 链的头只有 `sunl` 摘要；旧进程残留的 aux/finalized 状态不一致触发该断言。
+- 修复：**必须 `--fresh`**（清 `db`+`frontier`，保留 `keystore` 与 `network`）重建 genesis 才正常。与 gotchas「`:code` 在 DB 里、旧 runtime 会伪装成功」同源——只要 genesis/运行时变过就 fresh。本次 fresh 后 SunLead 正常出块 + GRANDPA 终局（finalized #148）。
+- 注：本批次提交并未动 DEX genesis（tiers/markets/oracle sources/USDC 未变），但运行时（SunLead 接线）变了，且 DB 是被杀进程残留，故 fresh 最稳。
+
+### 8.3 `scripts/dex_flow.py` 结果（全绿）
+
+| 步骤 | 结果 |
+|------|------|
+| 1. 真实指数价 | market0 = **80928 ticks**（age 0 blocks，**2 源**）—— 节点自带喂价经代理拉到真实行情 |
+| 2. deposit | 账户 `0x1be31a…` 托管 **3,000,000,000 USDC**（非零 → genesis 资产到位） |
+| 3. resting buy | @80118（index 80928）被接受，`resting orders = 1` |
+| 4. crossing sell | @80118 触发成交 |
+| 5. 成交断言 | `FeePool` 增长 **96142** —— gotchas 指明费用是「只有真实成交才会增长」的权威证据，故撮合确实发生 |
+
+### 8.4 链上复核（不靠"accepted/Ok"）
+
+- `ActionNonce = 2`（buy + sell 两步动作，nonce 已推进）。
+- `FeePool = 96142`（首跑从 0 增长，证明发生结算/手续费）。
+- `MarketPrices[0]` 新鲜：`80928 ticks`、updated_at = head(151)、`2` 源。
+- `finalized #148` 持续推进；无 panic / `BadProof` / equivocation。
+
+### 8.5 一个重要说明（避免误读）
+
+`dex_flow.py` 用**同一把密钥 / 同一账户**（`0x1be31a…`）既做 maker buy 又做 taker sell，属于**自成交**，多空各 2 lots 净值 = 0，因此 `Positions[1be31a, mkt0]` 不残留、查到 `none` 是正确的（不是失败）。但手续费照收（`FeePool` 增长），证明撮合引擎 + 手续费链路通。要留下净头寸，需要**两方不同账户**成交（一方 resting 另一方 crossing），这是下一步可选的深化验证。
+
+### 8.6 结论
+
+SunLead 出块 + GRANDPA 终局的链上，DEX 闭环（喂价 → 充值 → 挂单 → 撮合 → 手续费结算）端到端跑通，全程无静默失败；链上状态（价格/nonce/费用）与流程断言一致。
