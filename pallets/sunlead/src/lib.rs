@@ -106,9 +106,14 @@ pub mod pallet {
 	pub type LastSession<T> = StorageValue<_, u32, ValueQuery>;
 
 	/// Whether SunLead is the active authoring consensus. While `false`, BABE
-	/// remains the block author (default). Flipped to `true` only at the
-	/// governance-approved activation block (P5 migration). Exposed to the node
-	/// via `SunLeadApi::is_active` so the verifier/worker can gate on it.
+	/// remains the block author (default). This flag is **genesis-only**: it is
+	/// set by `GenesisConfig::sunlead_active` and there is no runtime dispatch to
+	/// flip it, so the active authoring engine is fixed for the lifetime of the
+	/// chain and cannot be toggled by governance mid-flight (which would desync
+	/// node / Runtime consensus — see Remediation 4.1). The P5 activation state
+	/// machine will replace this boolean with a finalized `activation_epoch`
+	/// transition. Exposed to the node via `SunLeadApi::is_active` so the
+	/// verifier/worker can gate on it.
 	#[pallet::storage]
 	pub type SunLeadActive<T> = StorageValue<_, bool, ValueQuery>;
 
@@ -116,16 +121,25 @@ pub mod pallet {
 	///
 	/// Lets a chain spec decide whether SunLead is the active authoring consensus at
 	/// genesis (the node's startup gate reads `is_active` at block 0, so the flag must
-	/// be set here — flipping it later via `set_sunlead_active` does not retroactively
-	/// switch the already-chosen import queue/authorer). The initial authority snapshot
-	/// + schedule are also built here because `on_initialize` does not run on the
-	/// genesis block, yet the first SunLead-authored block needs the snapshot to exist
-	/// at the genesis state.
+	/// be set here). There is no runtime call to flip it later, so this is the only
+	/// way to choose the active authoring engine for the chain — the P5 activation
+	/// state machine will supersede this with a finalized epoch transition. The
+	/// initial authority snapshot + schedule are also built here because
+	/// `on_initialize` does not run on the genesis block, yet the first
+	/// SunLead-authored block needs the snapshot to exist at the genesis state.
 	#[derive(frame_support::DefaultNoBound)]
 	#[pallet::genesis_config]
 	pub struct GenesisConfig<T: Config> {
 		/// Whether SunLead is the active authoring consensus at genesis.
 		pub sunlead_active: bool,
+		/// Schedule parameters frozen per epoch. Validated and persisted at genesis
+		/// (they were previously never written, so this also fixes that bug). The
+		/// value defaults to [`SunLeadScheduleParams::v1_defaults`]; make it
+		/// configurable (and governance-controlled) once a `set_schedule_params`
+		/// extrinsic exists. `#[serde(skip)]` keeps it out of the chain-spec JSON
+		/// (no serde impl needed) while still letting `build()` persist it.
+		#[serde(skip)]
+		pub params: SunLeadScheduleParams,
 		#[serde(skip)]
 		pub _phantom: core::marker::PhantomData<T>,
 	}
@@ -133,6 +147,17 @@ pub mod pallet {
 	#[pallet::genesis_build]
 	impl<T: Config> BuildGenesisConfig for GenesisConfig<T> {
 		fn build(&self) {
+			// Validate and persist the schedule parameters. They are frozen into the
+			// epoch snapshot at each boundary, but must be validated once here so a
+			// misconfigured chain spec fails fast at genesis rather than producing an
+			// un-authorable chain. (Previously `ScheduleParams` was never written, so
+			// the `params` genesis field was silently ignored and the `Default` value
+			// was always used — this now honors the configured value.)
+			self.params
+				.validate()
+				.expect("invalid SunLead ScheduleParams in genesis config");
+			ScheduleParams::<T>::put(self.params);
+
 			SunLeadActive::<T>::put(self.sunlead_active);
 			// Best-effort: build the epoch-0 snapshot + schedule so the very first
 			// SunLead-authored block can derive its leader. Ignore failure (e.g. a
@@ -159,22 +184,9 @@ pub mod pallet {
 		ScheduleBuildFailed,
 		/// A validator had no `sunl` session key registered.
 		MissingSunLeadKey,
-	}
-
-	#[pallet::call]
-	impl<T: Config> Pallet<T> {
-		/// Enable/disable SunLead as the active authoring consensus.
-		///
-		/// Governance-gated: only `Root` may flip the switch. Until activated,
-		/// BABE remains the block author (P2/P3 keep BABE running by default; the
-		/// actual handoff to SunLead production is the P5 migration).
-		#[pallet::call_index(0)]
-		#[pallet::weight(T::DbWeight::get().writes(1))]
-		pub fn set_sunlead_active(origin: OriginFor<T>, enabled: bool) -> DispatchResult {
-			ensure_root(origin)?;
-			SunLeadActive::<T>::put(enabled);
-			Ok(())
-		}
+		/// Proposed / configured schedule parameters are outside the
+		/// governance-acceptable range (see `SunLeadScheduleParams::validate`).
+		InvalidScheduleParams,
 	}
 
 	#[pallet::hooks]
@@ -187,6 +199,17 @@ pub mod pallet {
 				if Self::build_current_snapshot(session).is_ok() {
 					LastSession::<T>::put(session);
 				}
+			}
+			// Fail-fast: an active SunLead chain that still has no valid authority
+			// snapshot after a rebuild attempt cannot author blocks. Refuse to run
+			// rather than silently produce an un-authorable chain (e.g. validators
+			// missing their `sunl` session key, or empty authorities / bad params).
+			if SunLeadActive::<T>::get() && Snapshot::<T>::get().is_none() {
+				panic!(
+					"SunLead is active but no authority snapshot could be built; \
+					 ensure every validator has a registered `sunl` session key and \
+					 that the authority set / schedule params are valid"
+				);
 			}
 			// Approximate weight: a few storage reads plus the (cheap) rebuild reads.
 			T::DbWeight::get().reads_writes(4, 3)
@@ -207,10 +230,17 @@ pub mod pallet {
 
 		/// Build (and store) the authority snapshot + schedule for `session`.
 		fn build_current_snapshot(session: u32) -> DispatchResult {
+			// NOTE: this stored `epoch_index` / `activation_slot` are *session*-
+			// snapshot bookkeeping (anchored to the session counter). On-chain
+			// verification and the producer derive the schedule epoch directly from
+			// the absolute, time-based slot (`slot / epoch_slots`); they do NOT use
+			// these stored values. They are retained for the `ScheduleComputed`
+			// event / `CurrentEpochIndex` and as the snapshot's own identity.
 			let epoch: EpochIndex = session as u64;
 			let authority_set_id: AuthoritySetId =
 				pallet_grandpa::CurrentSetId::<T::Grandpa>::get();
 			let params = ScheduleParams::<T>::get();
+			params.validate().map_err(|_| Error::<T>::InvalidScheduleParams)?;
 
 			// Epoch seed from finalized BABE randomness.
 			let seed_bytes = pallet_babe::Randomness::<T::Babe>::get();
@@ -259,6 +289,7 @@ pub mod pallet {
 				authorities,
 				epoch_seed,
 				schedule_root: sched.root,
+				params,
 			};
 
 			Snapshot::<T>::put(&snapshot);
@@ -288,11 +319,49 @@ pub mod pallet {
 		}
 
 		pub fn leader_at(slot: u64) -> Option<(u32, sunlead_primitives::WindowId)> {
-			Schedule::<T>::get().and_then(|s| s.leader_at(slot))
+			let snapshot = Snapshot::<T>::get()?;
+			let params = snapshot.params;
+			// The epoch is anchored to the absolute slot clock (not the session
+			// counter): `epoch = slot / epoch_slots`, `rel = slot % epoch_slots`.
+			// Mirrors the verifier / producer so diagnostics agree with on-chain
+			// verification.
+			let epoch = slot / params.epoch_slots;
+			let rel = slot % params.epoch_slots;
+			let input = ScheduleInput {
+				chain_id: snapshot.chain_id,
+				authority_set_id: snapshot.authority_set_id,
+				epoch_index: epoch,
+				epoch_seed: snapshot.epoch_seed,
+				authorities: snapshot
+					.authorities
+					.iter()
+					.map(|a| (a.id.clone(), a.stake))
+					.collect(),
+				params,
+			};
+			sunlead_schedule::build_schedule(&input).ok().and_then(|s| s.leader_at(rel))
 		}
 
 		pub fn schedule_proof(slot: u64) -> Option<sunlead_schedule::SunLeadScheduleProof> {
-			Schedule::<T>::get().and_then(|s| s.schedule_proof(slot))
+			let snapshot = Snapshot::<T>::get()?;
+			let params = snapshot.params;
+			let epoch = slot / params.epoch_slots;
+			let rel = slot % params.epoch_slots;
+			let input = ScheduleInput {
+				chain_id: snapshot.chain_id,
+				authority_set_id: snapshot.authority_set_id,
+				epoch_index: epoch,
+				epoch_seed: snapshot.epoch_seed,
+				authorities: snapshot
+					.authorities
+					.iter()
+					.map(|a| (a.id.clone(), a.stake))
+					.collect(),
+				params,
+			};
+			sunlead_schedule::build_schedule(&input)
+				.ok()
+				.and_then(|s| s.schedule_proof(rel))
 		}
 
 		/// Whether SunLead is the currently active authoring consensus.

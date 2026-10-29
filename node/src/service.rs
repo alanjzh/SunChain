@@ -50,6 +50,7 @@ use crate::sunlead_consensus::{
 use sp_api::ProvideRuntimeApi;
 use sp_core::crypto::KeyTypeId;
 use sunchain_runtime::apis::SunLeadApi;
+use sunlead_primitives::SUNLEAD_ENGINE_ID;
 
 /// Ensure the well-known dev session keys (babe/grandpa/imon/audi/sunl) for `seed`
 /// (e.g. `//Alice`) are present in the keystore.
@@ -173,13 +174,15 @@ pub fn new_partial<NB>(
             // sc_consensus_grandpa::GrandpaBlockImport<FullBackend, Block, FullClient, FullSelectChain>,
             // sc_consensus_grandpa::LinkHalf<Block, FullClient, FullSelectChain>,
             (
-				sc_consensus_babe::BabeBlockImport<
-				Block,
-				FullClient, 
-				FrontierBlockImport<Block,FullGrandpaBlockImport,FullClient>,
+				Option<
+					sc_consensus_babe::BabeBlockImport<
+						Block,
+						FullClient,
+						FrontierBlockImport<Block, FullGrandpaBlockImport, FullClient>,
+					>,
 				>,
                 sc_consensus_grandpa::LinkHalf<Block, FullClient, FullSelectChain>,
-                sc_consensus_babe::BabeLink<Block>,
+                Option<sc_consensus_babe::BabeLink<Block>>,
             ),
             Option<Telemetry>,
 			Option<BabeWorkerHandle<Block>>,
@@ -273,16 +276,16 @@ where
         client.clone(),
     );
 
-	let (babe_block_import, babe_link) = sc_consensus_babe::block_import(
-        sc_consensus_babe::configuration(&*client)?,
-        frontier_block_import.clone(),
-        client.clone(),
-    )?;
+	// BABE's `block_import` eagerly finalizes the current finalized head on
+	// construction, which panics when that head is a SunLead block (it carries no
+	// BABE pre-digest). We therefore only build it when BABE is actually the
+	// active authoring consensus; SunLead chains never construct it. The slot
+	// duration is read from the runtime config (no construction) and is needed by
+	// both consensus paths for the timestamp<->slot mapping.
+	let babe_config = sc_consensus_babe::configuration(&*client)?;
+	let slot_duration = babe_config.slot_duration();
 
-    let justification_import = grandpa_block_import.clone();
-
-
-    let slot_duration = babe_link.config().slot_duration();
+	let justification_import = grandpa_block_import.clone();
 
     // let cidp_client = client.clone();
     // let import_queue =
@@ -326,9 +329,53 @@ where
         .flatten()
         .expect("Genesis block exists; qed");
     let sunlead_api = sp_api::ProvideRuntimeApi::runtime_api(client.as_ref());
-    let use_sunlead =
-        sunchain_runtime::apis::SunLeadApi::is_active(&*sunlead_api, genesis_hash).unwrap_or(false);
+    // Decide which authoring consensus is active. `SunLeadActive` is a genesis-set
+    // constant, so its value is identical at every block — but the *genesis* state
+    // can be pruned from the DB on a long-running restart, which makes a runtime-API
+    // call at `block_hash(0)` fail with `UnknownBlock("State already discarded")`.
+    // Reading it at the (recent, unpruned) finalized head avoids that; as a last
+    // resort we fall back to inspecting the finalized head's digest for the SunLead
+    // engine id so a validator reboot can never be misclassified as BABE.
+    let finalized_hash = client.chain_info().finalized_hash;
+    let use_sunlead = match sunchain_runtime::apis::SunLeadApi::is_active(&*sunlead_api, finalized_hash) {
+        Ok(active) => active,
+        Err(e) => {
+            log::warn!(
+                target: "sunlead",
+                "is_active API at finalized head failed ({:?}); falling back to digest inspection",
+                e
+            );
+            client
+                .header(finalized_hash)
+                .ok()
+                .flatten()
+                .map(|h: <Block as sp_runtime::traits::Block>::Header| {
+                    sp_runtime::traits::Header::digest(&h)
+                        .logs()
+                        .iter()
+                        .any(|l| l.as_pre_runtime().map(|(id, _)| id) == Some(SUNLEAD_ENGINE_ID))
+                })
+                .unwrap_or(false)
+        }
+    };
     log::info!(target: "sunlead", "SunLead activation flag (is_active) = {}", use_sunlead);
+
+    // Only construct BABE's block import / link when BABE is the active authoring
+    // consensus. On a SunLead chain this must stay `None`: building it eagerly
+    // finalizes the current finalized head, which (being a SunLead block) carries
+    // no BABE pre-digest and would panic the node at startup (a validator reboot
+    // would then bring the chain down). `slot_duration` above already came from the
+    // runtime config, so SunLead's timestamp<->slot mapping is unaffected.
+    let (babe_block_import, babe_link) = if use_sunlead {
+    	(None, None)
+    } else {
+    	let (bi, bl) = sc_consensus_babe::block_import(
+    		babe_config,
+    		frontier_block_import.clone(),
+    		client.clone(),
+    	)?;
+    	(Some(bi), Some(bl))
+    };
 
     let (import_queue, babe_worker_handle): (
         sc_consensus::import_queue::BasicQueue<Block>,
@@ -345,8 +392,12 @@ where
         (iq, None)
     } else {
         let (iq, bh) = sc_consensus_babe::import_queue(sc_consensus_babe::ImportQueueParams {
-            link: babe_link.clone(),
-            block_import: babe_block_import.clone(),
+            link: babe_link
+                .clone()
+                .expect("BABE link present when BABE is the active consensus"),
+            block_import: babe_block_import
+                .clone()
+                .expect("BABE block import present when BABE is the active consensus"),
             justification_import: Some(Box::new(justification_import.clone())),
             client: client.clone(),
             select_chain: select_chain.clone(),
@@ -444,12 +495,14 @@ pub async fn new_full_base<N: NetworkBackend<Block, <Block as sp_runtime::traits
     config: Configuration,
 	eth_config: EthConfiguration,
     with_startup_data: impl FnOnce(
-        &sc_consensus_babe::BabeBlockImport<
-		Block,
-		FullClient, 
-		FrontierBlockImport<Block,FullGrandpaBlockImport,FullClient>,
-		>,
-        &sc_consensus_babe::BabeLink<Block>,
+        &Option<
+            sc_consensus_babe::BabeBlockImport<
+                Block,
+                FullClient,
+                FrontierBlockImport<Block, FullGrandpaBlockImport, FullClient>,
+            >,
+        >,
+        &Option<sc_consensus_babe::BabeLink<Block>>,
     ),
 ) -> Result<NewFullBase, ServiceError> {
     let exchange_pool_path = config.base_path.path().join("exchange_pool.bin");
@@ -639,7 +692,9 @@ pub async fn new_full_base<N: NetworkBackend<Block, <Block as sp_runtime::traits
 	let pubsub_notification_sinks2 = pubsub_notification_sinks1.clone();
     let rpc_backend = backend.clone();
 
-	let slot_duration = import_setup.2.config().slot_duration();
+	// `import_setup.2` (`babe_link`) is `None` on a SunLead chain, so derive the
+	// slot duration from the runtime config instead of the BABE link.
+	let slot_duration = sc_consensus_babe::configuration(&*client)?.slot_duration();
 	let target_gas_price = eth_config.target_gas_price;
     let pending_create_inherent_data_providers = move |_, ()| async move {
             let current = sp_timestamp::InherentDataProvider::from_system_time();
@@ -946,7 +1001,9 @@ pub async fn new_full_base<N: NetworkBackend<Block, <Block as sp_runtime::traits
         );
 
         let client_clone = client.clone();
-        let slot_duration = babe_link.config().slot_duration();
+        // `babe_link` is `None` on a SunLead chain, so derive the slot duration from
+        // the runtime config instead of the BABE link.
+        let slot_duration = sc_consensus_babe::configuration(&*client)?.slot_duration();
 
         if use_sunlead {
             log::info!(target: "sunlead", "starting SunLead authoring (is_active = true)");
@@ -989,7 +1046,9 @@ pub async fn new_full_base<N: NetworkBackend<Block, <Block as sp_runtime::traits
                 client: client.clone(),
                 select_chain,
                 env: proposer,
-                block_import,
+                block_import: block_import
+                    .clone()
+                    .expect("BABE block import present when BABE is the active consensus"),
                 sync_oracle: sync_service.clone(),
                 justification_sync_link: sync_service.clone(),
                 create_inherent_data_providers: move |parent, ()| {
@@ -1014,7 +1073,9 @@ pub async fn new_full_base<N: NetworkBackend<Block, <Block as sp_runtime::traits
                 },
                 force_authoring,
                 backoff_authoring_blocks,
-                babe_link,
+                babe_link: babe_link
+                    .clone()
+                    .expect("BABE link present when BABE is the active consensus"),
                 block_proposal_slot_portion: SlotProportion::new(0.5),
                 max_block_proposal_slot_portion: None,
                 telemetry: telemetry.as_ref().map(|x| x.handle()),

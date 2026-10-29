@@ -42,6 +42,7 @@ use sunlead_primitives::{
 use sunlead_schedule::{build_schedule, ComputedSchedule, ScheduleInput};
 
 use crate::sunlead_consensus::block_import::SunLeadBlockImport;
+use crate::sunlead_consensus::import_queue::{verify_sunlead_header, SunLeadHeaderInputs};
 
 /// The data the worker needs to author (and later sign) a SunLead block.
 #[derive(Clone)]
@@ -92,6 +93,7 @@ impl<B, C, E, I, SO, L, BS, Error> sc_consensus_slots::SimpleSlotWorker<B>
 	for SunLeadSlotWorker<B, C, E, I, SO, L, BS>
 where
 	B: BlockT,
+	B::Header: Clone,
 	C: ProvideRuntimeApi<B> + HeaderBackend<B> + HeaderMetadata<B, Error = sp_blockchain::Error> + Send + Sync + 'static,
 	C::Api: SunLeadApi<B>,
 	E: sp_consensus::Environment<B, Error = Error> + Send + Sync + 'static,
@@ -119,21 +121,30 @@ where
 		&mut self.block_import
 	}
 
-	fn aux_data(&self, parent: &B::Header, _slot: Slot) -> Result<Self::AuxData, ConsensusError> {
+	fn aux_data(&self, parent: &B::Header, slot: Slot) -> Result<Self::AuxData, ConsensusError> {
 		let api = self.client.runtime_api();
 		let parent_hash = parent.hash();
 		let snapshot = api
 			.current_snapshot(parent_hash.clone())
 			.map_err(|e| ConsensusError::ChainLookup(format!("sunlead: {:?}", e)))?
 			.ok_or(ConsensusError::InvalidAuthoritiesSet)?;
-		let params: SunLeadScheduleParams = api
-			.configuration(parent_hash)
-			.map_err(|e| ConsensusError::ChainLookup(format!("sunlead: {:?}", e)))?;
+
+		// Freeze the schedule parameters at the epoch boundary: verification (and
+		// the producer) must use the snapshot's frozen `params`, never the live,
+		// mutable `ScheduleParams` storage, so a mid-epoch governance change cannot
+		// retroactively invalidate or forge already-signed blocks.
+		let params: SunLeadScheduleParams = snapshot.params;
+
+		// The SunLead epoch is anchored to the absolute slot clock, not the session
+		// counter. Derive it from the slot so the schedule (and its Merkle root)
+		// is identical between the producer and the verifier, which both derive the
+		// same epoch from the same slot.
+		let epoch_index = *slot / params.epoch_slots;
 
 		let context = SunLeadScheduleContext {
 			chain_id: snapshot.chain_id,
 			authority_set_id: snapshot.authority_set_id,
-			epoch_index: snapshot.epoch_index,
+			epoch_index,
 			epoch_seed: snapshot.epoch_seed,
 			authorities: snapshot
 				.authorities
@@ -145,7 +156,7 @@ where
 		let input = ScheduleInput {
 			chain_id: context.chain_id,
 			authority_set_id: context.authority_set_id,
-			epoch_index: context.epoch_index,
+			epoch_index,
 			epoch_seed: context.epoch_seed,
 			authorities: context.authorities.clone(),
 			params,
@@ -224,6 +235,35 @@ where
 			.ok_or_else(|| ConsensusError::CannotSign("sunlead: key not found in keystore".into()))?;
 		let seal = SunLeadSignature::from(sig);
 		let seal_item = DigestItem::Seal(SUNLEAD_ENGINE_ID, seal.encode());
+
+		// Local self-check: run the *same* pure verification a remote peer applies
+		// to a gossiped block, so a block we are about to commit/propagate is
+		// validated against the exact leader/slot/root/signature/parent/monotonicity
+		// rules before it leaves this node. This catches producer or keystore
+		// mistakes (wrong leader claimed, stale epoch, bad signature) locally
+		// instead of only when peers reject the block. The `aux_data` already holds
+		// the schedule context and params that the verifier would reconstruct from
+		// the parent-state snapshot, so the check is identical to a remote import.
+		let parent_hash = *header.parent_hash();
+		let parent_header = self
+			.client
+			.header(parent_hash)
+			.map_err(|e| ConsensusError::ChainLookup(format!("sunlead: {:?}", e)))?
+			.ok_or_else(|| ConsensusError::ChainLookup("sunlead: parent header not found".into()))?;
+		let parent_sunlead_slot = find_sunlead_slot(&parent_header);
+		let inputs = SunLeadHeaderInputs {
+			context: _aux.context.clone(),
+			params: _aux.params.clone(),
+			parent_sunlead_slot,
+		};
+		let mut self_check_header = header.clone();
+		self_check_header
+			.digest_mut()
+			.logs
+			.push(DigestItem::Seal(SUNLEAD_ENGINE_ID, seal.encode()));
+		verify_sunlead_header::<B>(&self_check_header, self.genesis_hash, &inputs).map_err(
+			|e| ConsensusError::ClientImport(format!("sunlead: local self-check failed: {}", e)),
+		)?;
 
 		let mut import_block = sc_consensus::BlockImportParams::new(BlockOrigin::Own, header);
 		import_block.post_digests.push(seal_item);

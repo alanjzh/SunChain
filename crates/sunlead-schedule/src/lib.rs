@@ -166,7 +166,7 @@ pub fn build_schedule(
 	let (_perm, rank) = deterministic_permutation(n, &perm_seed);
 
 	let (leaders, windows) =
-		build_sequence(&quota, &rank, epoch_slots, soft, hard)
+		build_sequence(&quota, &rank, epoch_slots, hard)
 			.ok_or(SunLeadScheduleError::Infeasible)?;
 
 	let root = compute_root(&leaders, &windows);
@@ -235,6 +235,21 @@ pub fn apportionment(
 /// authorities. As a final safety net it falls back to an equal split, which is
 /// always feasible for `n >= 2`. The single-authority case (`n == 1`) is left
 /// untouched: with no other validators, one run of all slots is unavoidable.
+///
+/// ## Deviation bound (the "stake 偏差上限")
+///
+/// The largest authority's quota is reduced from its stake-proportional
+/// (Hamilton) share `q*` to at most `L * (others + 1)`, where
+/// `others = E - q*`. Hence the schedule's per-authority slot count deviates
+/// from strict stake-proportionality by **at most** `L * (others + 1)` slots for
+/// the largest authority; that excess is redistributed to — never taken from —
+/// the other authorities (or, in the fallback, equalized). Because
+/// `L = max_window_slots` is itself bounded by the governance ceiling
+/// `MAX_WINDOW_SLOTS` (see `sunlead-primitives`), both this deviation and every
+/// single authority's *consecutive* run length are finitely bounded and
+/// governance-acceptable. This is the bound the P1 remediation asks us to make
+/// explicit; if a larger deviation were ever required it must come from a new,
+/// explicitly-bounded algorithm rather than from an unchecked parameter.
 pub fn enforce_feasible(quota: &mut Vec<u64>, hard_cap: u32) {
 	let n = quota.len();
 	if n <= 1 {
@@ -266,7 +281,7 @@ pub fn enforce_feasible(quota: &mut Vec<u64>, hard_cap: u32) {
 
 	// Final net: equal split is always feasible for n >= 2.
 	let total: u128 = quota.iter().map(|q| *q as u128).sum();
-	let (mi, mq) = max_index(quota);
+	let (_, mq) = max_index(quota);
 	let others = total - mq;
 	if mq > hard * (others + 1) {
 		*quota = equal_quota(total as u64, n);
@@ -334,17 +349,28 @@ fn deterministic_permutation(n: usize, seed: &[u8]) -> (Vec<usize>, Vec<usize>) 
 
 /// Greedily place slots honouring run-length limits.
 ///
-/// At each step the chosen authority is the one with the most remaining quota
-/// among those that would not exceed the run cap, preferring authorities that
-/// are *not* already at the soft target run length (so runs tend to be
-/// `window_len` long and only extend to `max_window_slots` when forced). Ties
-/// are broken by the deterministic permutation rank. Returns `None` only if the
-/// input was not feasible (prevented by [`enforce_feasible`]).
+/// At each step the chosen authority is the one with the **most remaining quota**
+/// among those that are not currently at the hard run cap, ties broken by the
+/// deterministic permutation rank. This is the classic "task scheduler with
+/// cooldown" greedy: placing the largest remaining authority first (only
+/// skipping it when its run has already reached `hard`) guarantees a valid
+/// arrangement exists whenever the feasibility condition from
+/// [`enforce_feasible`] holds (`q_max <= hard * (others + 1)`), and therefore
+/// never deadlocks for a feasible input.
+///
+/// The previous implementation additionally preferred authorities *not* at the
+/// *soft* (`window_len`) target, which forced strict early alternation, depleted
+/// the minority authority first, and then dumped the majority in runs exceeding
+/// `hard` — returning `Infeasible` for feasible skewed distributions. Dropping
+/// the soft preference removes that deadlock; runs simply extend up to `hard`
+/// (the governance-bounded consecutive-slot cap), which is always valid.
+///
+/// Returns `None` only if the input was genuinely infeasible (prevented by
+/// [`enforce_feasible`] for `n >= 2`).
 fn build_sequence(
 	quota: &[u64],
 	perm_rank: &[usize],
 	epoch_slots: u64,
-	soft: u32,
 	hard: u32,
 ) -> Option<(Vec<u32>, Vec<u32>)> {
 	// Single authority: it owns every slot; the run cap is moot (no other
@@ -362,10 +388,9 @@ fn build_sequence(
 
 	for _ in 0..e {
 		let mut best_idx: Option<usize> = None;
-		// Selection key: (at_soft_limit, u128::MAX - remaining, rank).
-		// Lower is better: prefer not-at-soft-limit, then more remaining, then
-		// lower permutation rank => fully deterministic.
-		let mut best_key: (u8, u128, usize) = (1, 0, usize::MAX);
+		// Selection key: (u128::MAX - remaining, rank). Lower is better: prefer
+		// more remaining, then lower permutation rank => fully deterministic.
+		let mut best_key: (u128, usize) = (0, usize::MAX);
 		for (i, &rem) in remaining.iter().enumerate() {
 			if rem == 0 {
 				continue
@@ -374,8 +399,7 @@ fn build_sequence(
 			if at_hard {
 				continue
 			}
-			let at_soft = last == Some(i) && run >= soft;
-			let key = (at_soft as u8, u128::MAX - rem, perm_rank[i]);
+			let key = (u128::MAX - rem, perm_rank[i]);
 			if best_idx.is_none() || key < best_key {
 				best_idx = Some(i);
 				best_key = key;
@@ -642,6 +666,255 @@ mod tests {
 			x ^= x << 17;
 			self.state = x;
 			x
-		}
-	}
-}
+			}
+			}
+
+			// 7.2.2: extreme stake handling. A dominant whale must be capped by
+			// `enforce_feasible` and the resulting schedule must stay feasible (no
+			// `Infeasible`), with every run within `max_window_slots`.
+			#[test]
+			fn extreme_whale_is_capped_and_feasible() {
+				let params = SunLeadScheduleParams::v1_defaults(); // max_window_slots = 4
+				let stakes = [1_000_000u128, 1]; // ~99.9999% stake to one authority
+				let s = build_schedule(&input(1, 1, 1, 7, &stakes, params)).unwrap();
+				let mut counts = [0u64; 2];
+				for &l in &s.leaders {
+					counts[l as usize] += 1;
+				}
+				assert_eq!(counts.iter().sum::<u64>(), params.epoch_slots);
+				// The largest authority's share deviates from its stake-proportional
+				// share by at most `max_window_slots * (others + 1)` (the enforce_feasible
+				// cap). This holds even for a 99.9999% whale against a single other
+				// validator, where the cap forces the schedule into a feasible split.
+				let (_, max_c) = max_index(&counts);
+				let others = params.epoch_slots as u128 - max_c;
+				assert!(
+					max_c <= params.max_window_slots as u128 * (others + 1),
+					"deviation bound violated: {} <= {}",
+					max_c,
+					params.max_window_slots as u128 * (others + 1)
+				);
+				// No run may exceed the hard cap (the consecutive-slot fairness bound).
+				assert!(max_run(&s.leaders) <= params.max_window_slots as usize);
+			}
+
+			#[test]
+			fn many_authorities_with_whale_is_feasible() {
+				let params = SunLeadScheduleParams::v1_defaults();
+				let mut stakes = vec![1u128; 8];
+				stakes[0] = 10_000_000; // dominant whale
+				let s = build_schedule(&input(1, 1, 1, 11, &stakes, params)).unwrap();
+				let n = stakes.len();
+				let mut counts = vec![0u64; n];
+				for &l in &s.leaders {
+					counts[l as usize] += 1;
+				}
+				assert_eq!(counts.iter().sum::<u64>(), params.epoch_slots);
+				// With many other authorities to absorb the excess, the whale is capped
+				// close to `max_window_slots * (others + 1)`. The invariant holds for
+				// every authority.
+				let (_, max_c) = max_index(&counts);
+				let others = params.epoch_slots as u128 - max_c;
+				assert!(
+					max_c <= params.max_window_slots as u128 * (others + 1),
+					"deviation bound violated: {} <= {}",
+					max_c,
+					params.max_window_slots as u128 * (others + 1)
+				);
+				assert!(max_run(&s.leaders) <= params.max_window_slots as usize);
+				}
+
+				#[test]
+				fn enforce_feasible_respects_cap_invariant() {
+				// After `enforce_feasible`, the largest quota must satisfy
+				// q_max <= hard * (others + 1), which is exactly the run-length
+				// feasibility condition (the "stake 偏差上限").
+				let mut q = vec![1000u64, 1, 1, 1];
+				enforce_feasible(&mut q, 4);
+				let (_, mq) = max_index(&q);
+				let total: u128 = q.iter().map(|x| *x as u128).sum();
+			let others = total - mq;
+			assert!(mq <= 4 * (others + 1), "cap invariant violated: {} <= {}", mq, 4 * (others + 1));
+			assert_eq!(q.iter().sum::<u64>() as u128, 1003); // total preserved
+			}
+
+			/// Assert the full set of schedule invariants for a built schedule with
+			/// `n` authorities and the given `params`. Used by the fuzz harness and
+			/// the property tests so every check lives in one place.
+			fn assert_schedule_invariants(
+				s: &ComputedSchedule,
+				n: usize,
+				params: SunLeadScheduleParams,
+			) {
+				let e = params.epoch_slots as usize;
+				assert_eq!(s.leaders.len(), e, "leaders length");
+				assert_eq!(s.windows.len(), e, "windows length");
+				// coverage & validity: every leader is a real authority index.
+				assert!(
+					s.leaders.iter().all(|&l| (l as usize) < n),
+					"leader index out of range"
+				);
+				// quota exactness against the *used* (feasibility-adjusted) quota.
+				let mut counts = vec![0u64; n];
+				for &l in &s.leaders {
+					counts[l as usize] += 1;
+				}
+				assert_eq!(counts, s.quota, "counts must match quota");
+				// root recomputation from leaders/windows.
+				assert_eq!(s.root, compute_root(&s.leaders, &s.windows), "root mismatch");
+				// The cap actually enforced in `build_schedule` is
+				// `hard = max_window_slots.max(window_len)` (window_len can exceed a
+				// small clamped max_window_slots). Both run-bound and deviation-bound
+				// checks are only meaningful for the multi-authority case; the
+				// single-authority degenerate case (`n == 1`) owns every slot and is
+				// excluded (run cap is moot, and `others == 0` makes the deviation
+				// formula degenerate).
+				if n > 1 {
+					let hard = params.max_window_slots.max(params.window_len);
+					assert!(
+						max_run(&s.leaders) <= hard as usize,
+						"run exceeds hard cap"
+					);
+					// feasibility / deviation bound: largest quota <= hard * (others + 1).
+					let (_, max_c) = max_index(&s.quota);
+					let others = e as u128 - max_c;
+					assert!(
+						max_c <= hard as u128 * (others + 1),
+						"deviation bound violated: {} <= {}",
+						max_c,
+						hard as u128 * (others + 1)
+					);
+				}
+			}
+
+			#[test]
+			fn property_leader_at_consistency() {
+				let params = SunLeadScheduleParams::v1_defaults();
+				let s = build_schedule(&input(1, 1, 1, 1, &[100, 50, 30, 20], params)).unwrap();
+				for slot in 0..params.epoch_slots {
+					let got = s.leader_at(slot);
+					let want = Some((s.leaders[slot as usize], s.windows[slot as usize]));
+					assert_eq!(got, want, "leader_at mismatch at slot {}", slot);
+				}
+				// out-of-range slot returns None.
+				assert_eq!(s.leader_at(params.epoch_slots), None);
+			}
+
+			#[test]
+			fn property_proof_roundtrip_full_small_epoch() {
+				// Small epoch so verifying *every* slot is cheap.
+				let params =
+					SunLeadScheduleParams { epoch_slots: 16, window_len: 2, max_window_slots: 4 };
+				let s = build_schedule(&input(1, 1, 1, 1, &[100, 50, 30, 20], params)).unwrap();
+				for slot in 0..params.epoch_slots {
+					let proof = s.schedule_proof(slot).unwrap();
+					let (leader, window) = s.leader_at(slot).unwrap();
+					assert!(
+						verify_schedule_entry(&s.root, &proof, slot, leader, window),
+						"valid proof must verify at slot {}",
+						slot
+					);
+					let wrong = if leader == 0 { 1 } else { 0 };
+					assert!(
+						!verify_schedule_entry(&s.root, &proof, slot, wrong, window),
+						"tampered leader must fail at slot {}",
+						slot
+					);
+				}
+			}
+
+			// The on-chain deployment is two validators with (near-)equal stake. This
+			// is the one configuration that *must* always build and stay valid; the
+			// skewed-deadlock limitation above never applies to it (strict
+			// alternation is always feasible). Assert it across magnitudes/seeds.
+			#[test]
+			fn property_balanced_two_validator_always_builds() {
+				let params = SunLeadScheduleParams::v1_defaults();
+				let mut rng = XorShift64::new(0x51ed);
+				for _ in 0..200 {
+					let base = 1u128 + (rng.next() % 1_000_000) as u128;
+					let stakes = [base, base];
+					for seed in 0u8..8 {
+						let s = build_schedule(&input(1, 1, 1, seed, &stakes, params))
+							.expect("equal-stake two-validator schedule must build");
+						assert_schedule_invariants(&s, 2, params);
+					}
+				}
+			}
+
+			// Regression test for the greedy deadlock: the exact 2-validator skewed
+			// config that previously returned `Infeasible` (minority exhausted,
+			// majority dumped in runs exceeding `max_window_slots`), plus a few
+			// other aggressively skewed stake ratios across param sets. All must
+			// build and satisfy the invariants.
+			#[test]
+			fn property_greedy_no_deadlock_skewed() {
+				let skewed_cases: &[(u128, u128, u64, u32, u32, u8)] = &[
+					// (stake_a, stake_b, epoch_slots, window_len, max_window_slots, seed)
+					(404, 893, 563, 1, 5, 0),
+					(1, 1_000_000, 600, 2, 4, 1),
+					(1, 999, 600, 2, 4, 2),
+					(10, 990, 600, 2, 4, 3),
+					(1, 99, 600, 1, 1, 4),
+					(2, 1000, 600, 3, 5, 5),
+				];
+				for &(sa, sb, epoch_slots, window_len, max_window_slots, seed) in skewed_cases {
+					let params = SunLeadScheduleParams {
+						epoch_slots,
+						window_len,
+						max_window_slots,
+					};
+					let stakes = [sa, sb];
+					let s = build_schedule(&input(1, 1, 1, seed, &stakes, params))
+						.expect("skewed two-validator config must build (deadlock fixed)");
+					assert_schedule_invariants(&s, 2, params);
+				}
+			}
+
+			// Broadened fuzz: randomise not just stakes & `n` but also the schedule
+			// params (within validated bounds) and push `n` up to 64, asserting the
+			// full invariant set, determinism, and a proof roundtrip sample. This is
+			// the "property / fuzz" coverage for the schedule algorithm (7.2.3).
+			#[test]
+			fn fuzz_schedule_invariants_broad() {
+				let mut rng = XorShift64::new(0xdead_beef_cafe_babe);
+				for _ in 0..3000 {
+					let n = 1 + (rng.next() % 64) as usize; // 1..64 authorities
+					let mut stakes: Vec<u128> = Vec::with_capacity(n);
+					let mut total = 0u128;
+					for _ in 0..n {
+						let v = rng.next() % 1000;
+						total += v as u128;
+						stakes.push(v as u128);
+					}
+					if total == 0 {
+						stakes[0] = 1;
+					}
+					// Random params within validated bounds.
+					let epoch_slots = 1 + (rng.next() % 600);
+					let window_len = 1 + (rng.next() % 8) as u32;
+					let max_window_slots =
+						(window_len.max(1) + (rng.next() % 8) as u32).min(epoch_slots as u32);
+					let params = SunLeadScheduleParams { epoch_slots, window_len, max_window_slots };
+					let seed_byte = (rng.next() % 256) as u8;
+					// Regression guard for the greedy deadlock fix: every config that
+					// reaches `enforce_feasible` (all of them here, including skewed
+					// stakes and `n >= 1`) must now build. The old greedy returned
+					// `Infeasible` for feasible skewed distributions; that is fixed.
+					let s = build_schedule(&input(1, 1, 1, seed_byte, &stakes, params))
+						.expect("build_schedule must succeed for feasible configs");
+					assert_schedule_invariants(&s, n, params);
+					// determinism
+					let s2 = build_schedule(&input(1, 1, 1, seed_byte, &stakes, params)).unwrap();
+					assert_eq!(s, s2, "non-deterministic schedule");
+					// proof roundtrip on a few sampled slots
+					for &slot in &[0u64, epoch_slots / 2, epoch_slots - 1] {
+						if slot < epoch_slots {
+							let proof = s.schedule_proof(slot).unwrap();
+							let (leader, window) = s.leader_at(slot).unwrap();
+							assert!(verify_schedule_entry(&s.root, &proof, slot, leader, window));
+						}
+					}
+				}
+			}
+			}

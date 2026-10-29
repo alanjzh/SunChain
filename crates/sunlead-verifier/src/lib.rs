@@ -24,7 +24,7 @@ use sp_consensus_slots::Slot;
 use sp_core::crypto::Pair as _;
 use sp_core::H256;
 use sunlead_primitives::{
-	signing_message, AuthoritySetId, EpochIndex, SunLeadEquivocationProof, SunLeadId,
+	signing_message, AuthoritySetId, SunLeadEquivocationProof, SunLeadId,
 	SunLeadPreDigest, SunLeadPreDigestBody, SunLeadScheduleContext, SunLeadScheduleParams,
 	SunLeadSignature, SUNLEAD_PROTOCOL_VERSION,
 };
@@ -82,14 +82,27 @@ pub fn verify_pre_digest(
 	if digest.0.authority_set_id != context.authority_set_id {
 		return Err(SunLeadVerificationError::AuthoritySetMismatch)
 	}
-	if digest.0.epoch_index != context.epoch_index {
+
+	let slot = u64::from(digest.0.slot);
+	// The SunLead epoch is anchored to the *absolute, time-based* slot clock — not
+	// to the session counter. Derive it directly from the claimed slot so the
+	// producer and the verifier always agree regardless of how fast sessions
+	// advance, and so a block cannot be replayed under a different epoch's
+	// (identical-modulo-`epoch_slots`) schedule: a block may only claim the epoch
+	// its slot actually falls into.
+	let expected_epoch = slot / params.epoch_slots;
+	if digest.0.epoch_index != expected_epoch {
 		return Err(SunLeadVerificationError::EpochMismatch)
 	}
+	let rel_slot = slot % params.epoch_slots;
 
+	// Rebuild the schedule for this slot-derived epoch from the parent-state
+	// context. The session-based `context.epoch_index` only reflects authority-set
+	// rotation and is intentionally not used here.
 	let input = ScheduleInput {
 		chain_id: context.chain_id,
 		authority_set_id: context.authority_set_id,
-		epoch_index: context.epoch_index,
+		epoch_index: expected_epoch,
 		epoch_seed: context.epoch_seed,
 		authorities: context.authorities.clone(),
 		params: *params,
@@ -97,13 +110,6 @@ pub fn verify_pre_digest(
 	let sched =
 		build_schedule(&input).map_err(|_| SunLeadVerificationError::ScheduleBuildFailed)?;
 
-	let slot = u64::from(digest.0.slot);
-	// The digest stores the absolute runtime slot; the schedule is defined per-epoch as
-	// `slot % epoch_slots`, so map into the current epoch before deriving the leader.
-	let rel_slot = slot % params.epoch_slots;
-	if rel_slot >= params.epoch_slots {
-		return Err(SunLeadVerificationError::SlotOutOfRange)
-	}
 	if sched.root != digest.0.schedule_root {
 		return Err(SunLeadVerificationError::ScheduleRootMismatch)
 	}
@@ -211,7 +217,6 @@ pub fn verify_equivocation_proof(
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use sp_core::crypto::Pair as _;
 	use sp_core::sr25519::Pair;
 	use sunlead_primitives::{SunLeadPreDigest, SunLeadScheduleParams};
 
@@ -242,7 +247,7 @@ mod tests {
 		let context = SunLeadScheduleContext {
 			chain_id: 1,
 			authority_set_id: 1,
-			epoch_index: 1,
+			epoch_index: 0,
 			epoch_seed: h256_repeat(3),
 			authorities: ks
 				.iter()
@@ -376,10 +381,45 @@ mod tests {
 	#[test]
 	fn slot_out_of_range_is_rejected() {
 		let f = fixture();
+		// slot = epoch_slots + 5 falls into epoch 1, but the digest still claims
+		// epoch 0 (f.context.epoch_index). With the epoch derived from the slot,
+		// this is rejected as an epoch mismatch rather than a slot-out-of-range.
 		let (d, _) = signed_digest(&f, |b| b.slot = Slot::from(f.params.epoch_slots + 5));
 		assert_eq!(
 			verify_pre_digest(&f.genesis, &f.header, &d, &f.context, &f.params),
-			Err(SunLeadVerificationError::SlotOutOfRange)
+			Err(SunLeadVerificationError::EpochMismatch)
+		);
+	}
+
+	// A block whose absolute slot belongs to a *different* epoch must be rejected
+	// even when it claims the current epoch. This is the attack the plan calls
+	// out: a per-epoch schedule is identical modulo `epoch_slots`, so a
+	// modulo-only mapping would accept it. Here the slot is pushed three epochs
+	// forward (epoch 3) while the digest still claims epoch 0.
+	#[test]
+	fn cross_epoch_replay_is_rejected() {
+		let f = fixture();
+		let (d, _) =
+			signed_digest(&f, |b| b.slot = Slot::from(3 * f.params.epoch_slots + 5));
+		assert_eq!(
+			verify_pre_digest(&f.genesis, &f.header, &d, &f.context, &f.params),
+			Err(SunLeadVerificationError::EpochMismatch)
+		);
+	}
+
+	// A block that correctly derives its epoch from the slot (matching the
+	// claimed epoch) but is signed for a different slot within the same epoch is
+	// accepted by the epoch check; the signature/parent-hash checks (not tested
+	// here) are what bind it to the exact slot. This guards against accidentally
+	// tightening the epoch check too far.
+	#[test]
+	fn epoch_derived_from_slot_matches() {
+		let f = fixture();
+		// slot 7 stays in epoch 0; the digest claims epoch 0 -> epoch check passes.
+		let (d, _) = signed_digest(&f, |b| b.slot = Slot::from(7));
+		assert_eq!(
+			verify_pre_digest(&f.genesis, &f.header, &d, &f.context, &f.params),
+			Ok(())
 		);
 	}
 

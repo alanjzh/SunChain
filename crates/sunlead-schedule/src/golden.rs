@@ -53,6 +53,8 @@ pub fn generate_golden_vectors() -> GoldenVectors {
 	let def = SunLeadScheduleParams::v1_defaults();
 	let scenarios = vec![
 		scenario("single", 1, 1, 1, 42, &[100], def),
+		scenario("two-equal", 1, 1, 1, 2, &[100, 100], def),
+		scenario("two-skewed", 1, 1, 1, 3, &[900, 100], def),
 		scenario("equal-4", 1, 1, 1, 7, &[10, 10, 10, 10], def),
 		scenario("skewed", 1, 1, 1, 3, &[900, 50, 30, 20], def),
 		scenario("zero-stake", 1, 1, 1, 4, &[0, 0, 0, 0], def),
@@ -64,6 +66,24 @@ pub fn generate_golden_vectors() -> GoldenVectors {
 			5,
 			&(0..16).map(|i| 1 + i as u128).collect::<Vec<_>>(),
 			def,
+		),
+		scenario(
+			"max-64",
+			1,
+			1,
+			1,
+			8,
+			&(0..64).map(|i| 1 + i as u128).collect::<Vec<_>>(),
+			def,
+		),
+		scenario(
+			"tiny-epoch",
+			1,
+			1,
+			1,
+			9,
+			&[100, 50, 30, 20],
+			SunLeadScheduleParams { epoch_slots: 8, window_len: 2, max_window_slots: 4 },
 		),
 		scenario(
 			"long-epoch",

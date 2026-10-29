@@ -57,12 +57,45 @@ pub type Stake = u128;
 /// Identifier of a contiguous run (window) of slots owned by one leader.
 pub type WindowId = u32;
 
+/// Governance ceiling on [`SunLeadScheduleParams::max_window_slots`].
+///
+/// A single leader may never own more than this many *consecutive* slots. This is
+/// the primary fairness / liveness lever of the schedule: it bounds the worst-case
+/// run length any one validator can monopolize, and therefore also bounds the
+/// deviation [`sunlead_schedule::enforce_feasible`] may introduce from the pure
+/// stake-proportional apportionment (see that function for the math). Kept far
+/// above the V1 default (4) but small enough that no validator can own a long
+/// contiguous stretch of the epoch.
+pub const MAX_WINDOW_SLOTS: u32 = 64;
+
+/// Upper bound on [`SunLeadScheduleParams::epoch_slots`]. A `u64` is technically
+/// unbounded; this guards against accidental overflow downstream and against
+/// absurdly long epochs that would never complete a snapshot rebuild.
+pub const MAX_EPOCH_SLOTS: u64 = 4_194_304; // 2^22
+
 /// Schedule parameters frozen per epoch.
 ///
 /// `window_len` is the *target* run length for a leader; `max_window_slots` is
 /// the hard cap on consecutive slots a single leader may own. The schedule
 /// generator tries to keep runs at `window_len` and only extends a run up to
 /// `max_window_slots` when forced (e.g. very skewed stake).
+///
+/// ## Deviation bound (why these values matter)
+///
+/// The per-authority slot quota is first apportioned stake-proportionally
+/// (Hamilton / largest-remainder). When stake is skewed,
+/// [`sunlead_schedule::enforce_feasible`] caps the largest authority's quota at
+/// `max_window_slots * (others + 1)` so the run-length-bounded arrangement stays
+/// feasible (classic task-scheduler condition, with `L = max_window_slots`).
+/// Concretely:
+///
+/// * a single authority's *actual* share can deviate from its stake-proportional
+///   share by **at most** `max_window_slots * (others + 1)` slots (the excess is
+///   redistributed to — never taken from — the other authorities);
+/// * no authority ever owns more than `max_window_slots` *consecutive* slots.
+///
+/// Keeping `max_window_slots` within [`MAX_WINDOW_SLOTS`] is what makes that
+/// deviation (and any single run) finitely bounded and governance-acceptable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode, TypeInfo, MaxEncodedLen)]
 pub struct SunLeadScheduleParams {
 	/// Number of slots in the epoch.
@@ -73,11 +106,59 @@ pub struct SunLeadScheduleParams {
 	pub max_window_slots: u32,
 }
 
+/// Reasons a [`SunLeadScheduleParams`] is outside the governance-acceptable range.
+///
+/// Rejecting these combinations (at genesis or via governance) prevents a
+/// misconfigured schedule from ever being built — an invalid combination would
+/// otherwise surface only as a (fatal) infeasible-schedule panic deep in block
+/// production.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScheduleParamsError {
+	/// `epoch_slots` must be >= 1.
+	ZeroEpochSlots,
+	/// `epoch_slots` exceeds [`MAX_EPOCH_SLOTS`].
+	EpochSlotsTooLarge,
+	/// `window_len` must be >= 1.
+	WindowLenZero,
+	/// `max_window_slots` must be >= `window_len`.
+	MaxBelowWindow,
+	/// `max_window_slots` cannot exceed `epoch_slots` (a run can't be longer than
+	/// the whole epoch).
+	RunExceedsEpoch,
+	/// `max_window_slots` exceeds the governance ceiling [`MAX_WINDOW_SLOTS`].
+	WindowCapTooLarge,
+}
+
 impl SunLeadScheduleParams {
 	/// V1 default parameters from the development plan: 600 slots/epoch,
 	/// 2-slot window, 4-slot hard cap.
 	pub const fn v1_defaults() -> Self {
 		Self { epoch_slots: 600, window_len: 2, max_window_slots: 4 }
+	}
+
+	/// Validate against the governance-acceptable range. See the type docs for the
+	/// rationale behind each bound (in particular the `enforce_feasible`
+	/// deviation bound tied to `max_window_slots`).
+	pub const fn validate(&self) -> Result<(), ScheduleParamsError> {
+		if self.epoch_slots == 0 {
+			return Err(ScheduleParamsError::ZeroEpochSlots);
+		}
+		if self.epoch_slots > MAX_EPOCH_SLOTS {
+			return Err(ScheduleParamsError::EpochSlotsTooLarge);
+		}
+		if self.window_len == 0 {
+			return Err(ScheduleParamsError::WindowLenZero);
+		}
+		if self.max_window_slots < self.window_len {
+			return Err(ScheduleParamsError::MaxBelowWindow);
+		}
+		if self.max_window_slots as u64 > self.epoch_slots {
+			return Err(ScheduleParamsError::RunExceedsEpoch);
+		}
+		if self.max_window_slots > MAX_WINDOW_SLOTS {
+			return Err(ScheduleParamsError::WindowCapTooLarge);
+		}
+		Ok(())
 	}
 }
 
@@ -163,6 +244,14 @@ pub struct SunLeadAuthoritySnapshot<AccountId> {
 	pub epoch_seed: H256,
 	/// Merkle root of the derived schedule.
 	pub schedule_root: H256,
+	/// Schedule parameters frozen at this epoch boundary.
+	///
+	/// Verification must use these frozen values rather than the live, mutable
+	/// `ScheduleParams` storage: freezing guarantees every block in an epoch is
+	/// checked against the exact parameters that produced its `schedule_root`,
+	/// so a mid-epoch governance change to `ScheduleParams` cannot retroactively
+	/// invalidate (or be exploited to forge) already-signed blocks.
+	pub params: SunLeadScheduleParams,
 }
 
 /// A minimal context sufficient to *derive and verify* a schedule, without the
@@ -335,5 +424,51 @@ mod tests {
 
 		// A raw sr25519 signature is structurally a SunLeadSignature.
 		let _: Signature = sig.into();
+	}
+
+	#[test]
+	fn schedule_params_validate_accepts_defaults_and_bounds() {
+		assert!(SunLeadScheduleParams::v1_defaults().validate().is_ok());
+		// A tighter but still valid configuration passes.
+		let tight = SunLeadScheduleParams { epoch_slots: 600, window_len: 1, max_window_slots: 1 };
+		assert!(tight.validate().is_ok());
+		// The governance ceiling itself is allowed.
+		let at_ceiling =
+			SunLeadScheduleParams { epoch_slots: 600, window_len: 2, max_window_slots: MAX_WINDOW_SLOTS };
+		assert!(at_ceiling.validate().is_ok());
+	}
+
+	#[test]
+	fn schedule_params_validate_rejects_each_bound() {
+		// ZeroEpochSlots
+		let mut p = SunLeadScheduleParams::v1_defaults();
+		p.epoch_slots = 0;
+		assert_eq!(p.validate(), Err(ScheduleParamsError::ZeroEpochSlots));
+
+		// EpochSlotsTooLarge
+		let mut p = SunLeadScheduleParams::v1_defaults();
+		p.epoch_slots = MAX_EPOCH_SLOTS + 1;
+		assert_eq!(p.validate(), Err(ScheduleParamsError::EpochSlotsTooLarge));
+
+		// WindowLenZero
+		let mut p = SunLeadScheduleParams::v1_defaults();
+		p.window_len = 0;
+		assert_eq!(p.validate(), Err(ScheduleParamsError::WindowLenZero));
+
+		// MaxBelowWindow (window_len > max_window_slots)
+		let mut p = SunLeadScheduleParams::v1_defaults();
+		p.window_len = 8;
+		p.max_window_slots = 4;
+		assert_eq!(p.validate(), Err(ScheduleParamsError::MaxBelowWindow));
+
+		// RunExceedsEpoch (max_window_slots > epoch_slots)
+		let mut p = SunLeadScheduleParams::v1_defaults();
+		p.max_window_slots = 601;
+		assert_eq!(p.validate(), Err(ScheduleParamsError::RunExceedsEpoch));
+
+		// WindowCapTooLarge (above the governance ceiling, but within the epoch)
+		let mut p = SunLeadScheduleParams::v1_defaults();
+		p.max_window_slots = MAX_WINDOW_SLOTS + 1;
+		assert_eq!(p.validate(), Err(ScheduleParamsError::WindowCapTooLarge));
 	}
 }

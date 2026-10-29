@@ -33,6 +33,7 @@
 
 mod eth;
 pub mod exchange;
+pub mod sunlead;
 pub use eth::*;
 use sp_inherents::CreateInherentDataProviders;
 use std::sync::Arc;
@@ -175,6 +176,7 @@ where
     // C::Api: sp_consensus_aura::AuraApi<Block, AuraId>,
     C::Api: sc_consensus_babe::BabeApi<Block>,
     C::Api: sunchain_runtime::apis::ExchangeRuntimeApi<Block>,
+    C::Api: sunchain_runtime::apis::SunLeadApi<Block>,
     C::Api: BlockBuilder<Block>,
     C::Api: sp_api::ApiExt<Block>,
     C::Api: fp_rpc::ConvertTransactionRuntimeApi<Block>,
@@ -203,6 +205,7 @@ where
     };
     use sc_rpc_spec_v2::chain_spec::{ChainSpec, ChainSpecApiServer};
     use crate::rpc::exchange::{ExchangeApiServer, ExchangeRpc};
+    use crate::rpc::sunlead::{SunLeadRpc, SunLeadRpcApiServer};
     use sc_sync_state_rpc::{SyncState, SyncStateApiServer};
     use substrate_frame_rpc_system::{System, SystemApiServer};
     use substrate_state_trie_migration_rpc::{StateMigration, StateMigrationApiServer};
@@ -328,6 +331,8 @@ where
         client.clone(),
         exchange_outbound,
     ).into_rpc())?;
+
+    io.merge(SunLeadRpc::<C>::new(client.clone()).into_rpc())?;
 
     Ok(io)
 }

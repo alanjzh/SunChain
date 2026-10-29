@@ -7,6 +7,7 @@
 
 pub mod block_import;
 pub mod import_queue;
+pub mod metrics;
 pub mod worker;
 
 pub use block_import::SunLeadBlockImport;

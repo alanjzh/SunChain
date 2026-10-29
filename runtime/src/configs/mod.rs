@@ -39,7 +39,7 @@ use sp_version::RuntimeVersion;
 use pallet_im_online::sr25519::AuthorityId as ImOnlineId;
 
 use pallet_im_online::Call as ImOnlineCall;
-use sunlead_primitives::SunLeadId;
+use sunlead_primitives::{SunLeadId, SunLeadPreDigest, SUNLEAD_ENGINE_ID};
 use pallet_sunlead::SunLeadKeyLookup;
 use crate::{precompiles::FrontierPrecompiles, BaseFee, EVMChainId, UncheckedExtrinsic};
 use core::marker::PhantomData;
@@ -553,7 +553,7 @@ impl pallet_babe::Config for Runtime {
 }
 
 impl pallet_authorship::Config for Runtime {
-	type FindAuthor = pallet_session::FindAccountFromAuthorIndex<Self, Babe>;
+	type FindAuthor = SunLeadFindAuthor<pallet_session::FindAccountFromAuthorIndex<Self, Babe>>;
 	type EventHandler = (Staking, ImOnline);
 }
 
@@ -887,6 +887,42 @@ impl<F: FindAuthor<u32>> FindAuthor<H160> for FindAuthorTruncated<F> {
 		None
 	}
 }
+
+/// `FindAuthor` for SunLead blocks.
+///
+/// Resolves the block author from the SunLead pre-digest's `leader_index` by
+/// looking it up in the runtime authority snapshot. Falls back to `F` (the legacy
+/// BABE-based resolver) when no SunLead pre-digest is present, so it keeps working
+/// for BABE-authored blocks and the genesis block.
+pub struct SunLeadFindAuthor<F>(PhantomData<F>);
+
+/// Resolve the block author for `pallet_authorship` from the SunLead pre-digest's
+/// `leader_index` via the runtime authority snapshot (output `AccountId`). Falls
+/// back to `F` (the legacy BABE resolver) when no SunLead pre-digest is present,
+/// so BABE-authored blocks / the genesis block still get an author.
+impl<F: FindAuthor<crate::AccountId>> FindAuthor<crate::AccountId> for SunLeadFindAuthor<F> {
+	fn find_author<'a, I>(digests: I) -> Option<crate::AccountId>
+	where
+		I: 'a + IntoIterator<Item = (ConsensusEngineId, &'a [u8])>,
+	{
+		let digests: Vec<(ConsensusEngineId, &'a [u8])> = digests.into_iter().collect();
+		for (id, data) in &digests {
+			if *id == SUNLEAD_ENGINE_ID {
+				if let Ok(d) = SunLeadPreDigest::decode(&mut &data[..]) {
+					if let Some(snapshot) = pallet_sunlead::Snapshot::<Runtime>::get() {
+						if let Some(authority) =
+							snapshot.authorities.get(d.0.leader_index as usize)
+						{
+							return Some(authority.account);
+						}
+					}
+				}
+			}
+		}
+		F::find_author(digests.into_iter())
+	}
+}
+
 /// We allow for 2000ms of compute with a 6 second average block time.
 pub const WEIGHT_MILLISECS_PER_BLOCK: u64 = 2000;
 const BLOCK_GAS_LIMIT: u64 = 75_000_000;
