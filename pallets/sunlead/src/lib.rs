@@ -134,9 +134,9 @@ pub mod pallet {
 		pub sunlead_active: bool,
 		/// Schedule parameters frozen per epoch. Validated and persisted at genesis
 		/// (they were previously never written, so this also fixes that bug). The
-		/// value defaults to [`SunLeadScheduleParams::v1_defaults`]; make it
-		/// configurable (and governance-controlled) once a `set_schedule_params`
-		/// extrinsic exists. `#[serde(skip)]` keeps it out of the chain-spec JSON
+		/// value defaults to [`SunLeadScheduleParams::v1_defaults`]; it is also
+		/// governance-controlled at runtime via the `set_schedule_params`
+		/// extrinsic (root). `#[serde(skip)]` keeps it out of the chain-spec JSON
 		/// (no serde impl needed) while still letting `build()` persist it.
 		#[serde(skip)]
 		pub params: SunLeadScheduleParams,
@@ -175,6 +175,12 @@ pub mod pallet {
 			epoch: EpochIndex,
 			authority_set_id: AuthoritySetId,
 			schedule_root: H256,
+		},
+		/// Schedule parameters were updated via governance; the current snapshot
+		/// and schedule were immediately rebuilt with the new parameters.
+		ScheduleParamsUpdated {
+			epoch: EpochIndex,
+			params: SunLeadScheduleParams,
 		},
 	}
 
@@ -367,6 +373,42 @@ pub mod pallet {
 		/// Whether SunLead is the currently active authoring consensus.
 		pub fn is_active() -> bool {
 			SunLeadActive::<T>::get()
+		}
+	}
+
+	#[pallet::call]
+	impl<T: Config> Pallet<T> {
+		/// Update the active schedule parameters via governance (root).
+		///
+		/// `params` are validated against the governance-acceptable range via
+		/// `SunLeadScheduleParams::validate`; out-of-range values are rejected with
+		/// `InvalidScheduleParams`. On success the current authority snapshot and
+		/// schedule are immediately rebuilt with the new parameters. The node reads
+		/// the frozen snapshot `params` per block (see `worker`/`verifier`), so the
+		/// change takes effect at the next authored block without any
+		/// producer/verifier desync.
+		#[pallet::call_index(0)]
+		#[pallet::weight(<T as frame_system::Config>::DbWeight::get().reads_writes(3, 5))]
+		pub fn set_schedule_params(
+			origin: OriginFor<T>,
+			params: SunLeadScheduleParams,
+		) -> DispatchResult {
+			ensure_root(origin)?;
+			params
+				.validate()
+				.map_err(|_| Error::<T>::InvalidScheduleParams)?;
+			let session = pallet_session::CurrentIndex::<T::Session>::get();
+			// Persist first so the rebuild below reads the new parameters.
+			ScheduleParams::<T>::put(params);
+			// Rebuild the snapshot/schedule immediately. If the rebuild fails
+			// (e.g. a validator is missing its `sunl` key), the whole extrinsic
+			// reverts and the stored parameters are left unchanged.
+			Self::build_current_snapshot(session)?;
+			Self::deposit_event(Event::ScheduleParamsUpdated {
+				epoch: CurrentEpochIndex::<T>::get(),
+				params,
+			});
+			Ok(())
 		}
 	}
 }

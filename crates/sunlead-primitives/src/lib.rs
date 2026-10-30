@@ -23,7 +23,7 @@ extern crate alloc;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-use codec::{Decode, Encode, MaxEncodedLen};
+use codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 use sp_application_crypto::{app_crypto, sr25519, KeyTypeId};
 use sp_consensus_slots::Slot;
@@ -96,7 +96,7 @@ pub const MAX_EPOCH_SLOTS: u64 = 4_194_304; // 2^22
 ///
 /// Keeping `max_window_slots` within [`MAX_WINDOW_SLOTS`] is what makes that
 /// deviation (and any single run) finitely bounded and governance-acceptable.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode, TypeInfo, MaxEncodedLen)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode, DecodeWithMemTracking, TypeInfo, MaxEncodedLen)]
 pub struct SunLeadScheduleParams {
 	/// Number of slots in the epoch.
 	pub epoch_slots: u64,

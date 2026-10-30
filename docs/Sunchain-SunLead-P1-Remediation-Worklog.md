@@ -252,3 +252,30 @@
   `--prometheus-port`）：四 RPC 均返回正确数据（status/epoch/nextLeader/schedule）；
   `curl :9615/metrics` 可见 `sunlead_blocks_verified_total{chain="SUN"}=10`、
   `sunlead_equivocations_total=0`，错误扫描为空，GRANDPA 终局持续推进（#1866+）。
+
+## 四、`set_schedule_params` 治理 extrinsic（已完成）
+- **实现**（`pallets/sunlead/src/lib.rs`）：新增 `#[pallet::call] set_schedule_params(origin, params)`，
+  - 门控 `ensure_root`（即治理/referenda / `sudo` 派发的 Root origin；dev 链可经 `sudo` 调用）。
+  - 先 `params.validate()`（复用 7.2.1 的 `SunLeadScheduleParams::validate`，越界返回
+    `InvalidScheduleParams`），再 `ScheduleParams::<T>::put(params)` 持久化，随后**立即重建当前
+    authority snapshot + schedule**（`build_current_snapshot`），使新参数在下一出块即生效。若重建失败
+    （如某验证人缺失 `sunl` 密钥），整个 extrinsic 回滚、`ScheduleParams` 不变（FRAME 原子性）。
+  - 新增事件 `ScheduleParamsUpdated { epoch, params }` 记录治理动作；`ScheduleComputed` 仍由重建发出。
+  - 新增 `ScheduleParamsUpdated` 到 `Event` 枚举。
+- **配套类型改动**（`crates/sunlead-primitives/src/lib.rs`）：`SunLeadScheduleParams` 增加
+  `DecodeWithMemTracking` derive（新 Substrate 要求 call 参数为该 trait，否则编译失败）。
+- **防 desync 说明**：node 侧 verifier/worker 每出块都从 `current_snapshot()` 读取**冻结的 snapshot
+  params**（见 `worker.rs`/`import_queue.rs` 注释，并有 `verifier_uses_snapshot_params_not_configuration`
+  测试守门），与 runtime 的 `build_current_snapshot` 同源 —— 因此治理改参数后快照立即重建，node 下一出块
+  读到新 snapshot，生产/验证两侧天然一致，**不会**出现生产-验证参数错位。
+- **验收**：`cargo check -p pallet-sunlead`、`cargo check -p sunchain` 均通过（仅 warning）。
+  链上（运行时已变，**必须 `--fresh`** 重建）：双节点 `--fresh` 重启后 fresh genesis 正常、持续出块并
+  GRANDPA 终局推进、错误扫描为空；`state_getMetadata` 确认 runtime 元数据中已注册 `set_schedule_params`
+  call、`ScheduleParamsUpdated` event、`InvalidScheduleParams` error、`Sudo` pallet 均在位。
+  - **手动 sudo 验证步骤（需 sudo 签名密钥，本环境无 WS/签名密钥未执行实际派发）**：
+    1. `sudo` → `sunlead.setScheduleParams({ epoch_slots: 600, window_len: 3, max_window_slots: 6 })`
+       → 期望成功、发出 `ScheduleParamsUpdated`、下一出块 `schedule_root` 改变、链继续出块无 panic。
+    2. `sudo` → `sunlead.setScheduleParams({ epoch_slots: 600, window_len: 2, max_window_slots: 1 })`
+       → 期望被拒（`InvalidScheduleParams`，因 `max_window_slots < window_len`）。
+  - 部署提醒：本次改动在 runtime 新增 dispatchable + 改 `SunLeadScheduleParams` 派生 → runtime WASM 变化
+    → 部署**必须 `--fresh`**（清 db+frontier，保留 keystore+network）。
