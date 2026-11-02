@@ -6,11 +6,13 @@
 //! validated messages) and the voter/aggregator/observer (which read and
 //! aggregate). F2 is shadow: the pool never feeds fork choice or finality.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use sff_crypto::{aggregate_votes, LockTracker};
 use sff_primitives::{exceeds_two_thirds, FinalityAuthoritySet, Phase, QuorumCertificate, Vote};
 use sp_core::H256;
+use tokio::sync::Notify;
 
 /// Hard cap on total collected votes, across all (phase, height, round) keys.
 const MAX_TOTAL_VOTES: usize = 16 * 1024;
@@ -34,11 +36,77 @@ pub struct FastFinalityPool {
     seen_vote: HashMap<(u64, Phase, u32, u32, u32), ()>,
     /// Total votes, for the cap.
     total_votes: usize,
+    /// Keys whose vote set changed since the last aggregation attempt.
+    ///
+    /// Aggregation costs one BLS verification per vote, so it must happen when
+    /// something changed — not on every timer tick for every pending height.
+    /// Without this the per-tick cost grows with the backlog, which makes the
+    /// confirmation frontier fall further behind the faster it needs to run.
+    dirty: HashSet<(u64, Phase, u32, u32)>,
+    /// CommitQCs recorded since the observer last ran.
+    new_commit_qcs: Vec<QuorumCertificate>,
+    /// Lowest block height still accepted/pruned-away below. 0 = unbounded.
+    floor: u32,
+    /// Wakes the engine when something was inserted (event-driven aggregation).
+    waker: Option<Arc<Notify>>,
 }
 
 impl FastFinalityPool {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Installs the engine's wake-up handle: every accepted insert notifies it,
+    /// so aggregation is driven by events instead of by the timer alone.
+    pub fn set_waker(&mut self, waker: Arc<Notify>) {
+        self.waker = Some(waker);
+    }
+
+    /// Lowest height still accepted. Votes for older heights are dropped: a
+    /// shadow confirmation for a block far behind the tip is worth nothing and
+    /// would only grow the aggregation backlog.
+    pub fn set_floor(&mut self, floor: u32) {
+        self.floor = floor;
+    }
+
+    /// Drops everything below `min_height` (votes, certificates, dedup keys).
+    pub fn prune_below(&mut self, min_height: u32) {
+        let dropped: Vec<(u64, Phase, u32, u32)> = self
+            .votes
+            .keys()
+            .copied()
+            .filter(|(_, _, height, _)| *height < min_height)
+            .collect();
+        for key in dropped {
+            self.votes.remove(&key);
+            self.dirty.remove(&key);
+        }
+        self.qcs.retain(|(_, _, height, _), _| *height >= min_height);
+        self.pending_commit_qcs
+            .retain(|(_, height, _, _, _), _| *height >= min_height);
+        self.commit_qc.retain(|(_, height), _| *height >= min_height);
+        self.seen_vote.retain(|(_, _, height, _, _), _| *height >= min_height);
+        self.dirty.retain(|(_, _, height, _)| *height >= min_height);
+        self.total_votes = self.votes.values().map(|m| m.len()).sum();
+    }
+
+    /// Takes the keys whose vote set changed since the last call.
+    ///
+    /// Aggregation is BLS work, so callers must iterate **this** rather than all
+    /// pending keys.
+    pub fn take_dirty(&mut self) -> Vec<(u64, Phase, u32, u32)> {
+        self.dirty.drain().collect()
+    }
+
+    /// CommitQCs recorded since the last call (drains the queue).
+    pub fn take_new_commit_qcs(&mut self) -> Vec<QuorumCertificate> {
+        std::mem::take(&mut self.new_commit_qcs)
+    }
+
+    fn notify(&self) {
+        if let Some(waker) = &self.waker {
+            waker.notify_one();
+        }
     }
 
     /// Inserts a vote if not already seen. Returns `true` if newly inserted.
@@ -50,13 +118,16 @@ impl FastFinalityPool {
         if self.total_votes >= MAX_TOTAL_VOTES {
             return false;
         }
-        let entry = self
-            .votes
-            .entry((v.set_id, v.phase, v.height, v.round))
-            .or_default();
+        if v.height < self.floor {
+            return false;
+        }
+        let agg_key = (v.set_id, v.phase, v.height, v.round);
+        let entry = self.votes.entry(agg_key).or_default();
         entry.insert(v.signer_index, v);
         self.seen_vote.insert(key, ());
         self.total_votes += 1;
+        self.dirty.insert(agg_key);
+        self.notify();
         true
     }
 
@@ -124,6 +195,8 @@ impl FastFinalityPool {
             self.commit_qc
                 .entry((qc.set_id, qc.height))
                 .or_insert_with(|| qc.clone());
+            self.new_commit_qcs.push(qc.clone());
+            self.notify();
         }
         self.qcs.insert(key, qc);
         if key.1 == Phase::Prepare {
@@ -262,6 +335,75 @@ mod tests {
             signer_index: 0,
             signature: BlsSignature::ZERO,
         }
+    }
+
+    fn vote_at(set_id: u64, height: u32, signer: u32) -> Vote {
+        let mut v = vote(set_id);
+        v.height = height;
+        v.signer_index = signer;
+        v
+    }
+
+    /// Aggregation is BLS work: it must be attempted when the vote set changed,
+    /// not for every pending height on every tick (§13.2(b)).
+    #[test]
+    fn dirty_keys_track_only_changed_vote_sets() {
+        let mut pool = FastFinalityPool::new();
+        assert!(pool.take_dirty().is_empty());
+
+        assert!(pool.add_vote(vote_at(1, 10, 0)));
+        assert!(pool.add_vote(vote_at(1, 10, 1)));
+        // One key, whatever the number of votes that landed on it.
+        assert_eq!(pool.take_dirty(), vec![(1, Phase::Prepare, 10, 0)]);
+        // Drained: a second sweep must not redo the aggregation.
+        assert!(pool.take_dirty().is_empty());
+
+        // A duplicate vote (same signer) changes nothing.
+        assert!(!pool.add_vote(vote_at(1, 10, 0)));
+        assert!(pool.take_dirty().is_empty());
+    }
+
+    #[test]
+    fn backlog_floor_rejects_and_prunes_old_heights() {
+        let mut pool = FastFinalityPool::new();
+        assert!(pool.add_vote(vote_at(1, 10, 0)));
+        assert!(pool.add_vote(vote_at(1, 50, 0)));
+
+        pool.set_floor(40);
+        // Below the floor nothing is accepted any more.
+        assert!(!pool.add_vote(vote_at(1, 30, 1)));
+
+        pool.prune_below(40);
+        assert!(pool.votes_for(1, Phase::Prepare, 10, 0).is_empty());
+        assert_eq!(pool.votes_for(1, Phase::Prepare, 50, 0).len(), 1);
+        // Pruned keys must not be handed back to the aggregator.
+        assert_eq!(pool.take_dirty(), vec![(1, Phase::Prepare, 50, 0)]);
+        // Re-inserting a pruned height is allowed (it was forgotten, not banned):
+        // the floor is what rejects it.
+        assert!(!pool.add_vote(vote_at(1, 10, 0)));
+    }
+
+    #[test]
+    fn new_commit_qcs_are_drained_once() {
+        let mut pool = FastFinalityPool::new();
+        let prepare = qc(1, Phase::Prepare, 10, H256::repeat_byte(4), None);
+        assert!(pool.add_qc(prepare.clone()));
+
+        let commit = qc(
+            1,
+            Phase::Commit,
+            10,
+            H256::repeat_byte(4),
+            Some(prepare.vote_payload_hash),
+        );
+        assert!(pool.add_qc(commit.clone()));
+
+        let drained = pool.take_new_commit_qcs();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].phase, Phase::Commit);
+        // The observer runs on every aggregation: draining twice must yield
+        // nothing, otherwise the same QC is classified again and again.
+        assert!(pool.take_new_commit_qcs().is_empty());
     }
 
     #[test]

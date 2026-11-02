@@ -10,7 +10,7 @@
 //! interrupt BABE authoring or GRANDPA finality.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     marker::PhantomData,
     sync::{Arc, Mutex},
     time::Duration,
@@ -24,7 +24,7 @@ use sp_core::H256;
 use sp_keystore::{Keystore, KeystorePtr};
 use sp_runtime::traits::{Block as BlockT, Header as HeaderT, UniqueSaturatedInto};
 use sunchain_runtime::apis::FastFinalityApi;
-use tokio::time::interval;
+use tokio::{sync::Notify, time::interval};
 
 use sff_crypto::{pop_verify, verify_vote};
 use sff_primitives::{
@@ -33,6 +33,7 @@ use sff_primitives::{
 
 use crate::fast_finality_p2p::{RepairRequest, SffMessage};
 use crate::fast_finality_pool::FastFinalityPool;
+use crate::fast_finality_view::{ChainView, ClientChainView, Consistency, FastFinalityView};
 
 /// Supplies the candidate SFF authority set. The runtime API returns the set
 /// built from elected validators + registered BLS keys; this trait decouples the
@@ -51,6 +52,54 @@ pub trait SffSigner: Send + Sync {
     fn sign(&self, public: &BlsPublicKey, payload: &[u8]) -> Option<BlsSignature>;
 }
 
+/// Minimum spacing between two "SFF is dormant" warnings.
+const DORMANT_LOG_INTERVAL: Duration = Duration::from_secs(30);
+
+/// How many blocks behind the tip SFF may still track.
+///
+/// Anything older is dropped: a shadow confirmation that far behind is useless,
+/// and keeping it is what made aggregation cost grow with the backlog.
+const MAX_BACKLOG_HEIGHTS: u32 = 64;
+
+/// How many authority snapshots to keep after their set rotated out.
+///
+/// Votes are bound to `(set_id, snapshot_root)`, and the runtime can only build
+/// the *current* set (session keys move on at rotation). Without a cache every
+/// certificate that was still in flight when the session rotated is discarded —
+/// on chains with short sessions that means SFF almost never completes a round
+/// and fast confirmation trails GRANDPA instead of leading it. The cache is
+/// bounded, so a long rotation history cannot grow it.
+const MAX_CACHED_SETS: usize = 8;
+
+/// Bounded `set_id -> snapshot` cache, evicting the oldest entry.
+#[derive(Default)]
+pub struct SetCache {
+    sets: HashMap<u64, FinalityAuthoritySet>,
+    order: VecDeque<u64>,
+}
+
+impl SetCache {
+    pub fn get(&self, set_id: u64) -> Option<FinalityAuthoritySet> {
+        self.sets.get(&set_id).cloned()
+    }
+
+    pub fn insert(&mut self, set: FinalityAuthoritySet) {
+        let set_id = set.set_id;
+        if self.sets.insert(set_id, set).is_none() {
+            self.order.push_back(set_id);
+            while self.order.len() > MAX_CACHED_SETS {
+                if let Some(oldest) = self.order.pop_front() {
+                    self.sets.remove(&oldest);
+                }
+            }
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.sets.len()
+    }
+}
+
 /// `AuthorityProvider` backed by the `FastFinalityApi` runtime API.
 pub struct RuntimeAuthorityProvider<B, C> {
     pub client: Arc<C>,
@@ -64,6 +113,9 @@ pub struct RuntimeAuthorityProvider<B, C> {
     /// key. Production leaves this empty: the PoP then comes from the on-chain
     /// registration and is verified as-is.
     dev_pops: Vec<(BlsPublicKey, BlsSignature)>,
+    /// Snapshots kept for sets that already rotated out, so certificates that
+    /// were still in flight at rotation can still be completed and validated.
+    cache: Mutex<SetCache>,
     _phantom: PhantomData<B>,
 }
 
@@ -72,8 +124,26 @@ impl<B, C> RuntimeAuthorityProvider<B, C> {
         Self {
             client,
             dev_pops,
+            cache: Mutex::new(SetCache::default()),
             _phantom: PhantomData,
         }
+    }
+
+    fn with_dev_pops(&self, mut set: FinalityAuthoritySet) -> FinalityAuthoritySet {
+        if !self.dev_pops.is_empty() {
+            for authority in &mut set.authorities {
+                if !pop_verify(&authority.bls_public_key, &authority.proof_of_possession) {
+                    let found = self
+                        .dev_pops
+                        .iter()
+                        .find(|(pk, _)| *pk == authority.bls_public_key);
+                    if let Some((_, pop)) = found {
+                        authority.proof_of_possession = *pop;
+                    }
+                }
+            }
+        }
+        set
     }
 }
 
@@ -92,30 +162,24 @@ where
     }
 
     fn authorities(&self, set_id: u64) -> Option<FinalityAuthoritySet> {
-        let at = self.client.info().best_hash;
-        let mut set = self
-            .client
-            .runtime_api()
-            .fast_finality_authorities(at, set_id)
-            .ok()
-            .flatten()?;
-        // Fill in the dev PoPs where the runtime could not serve one (see
-        // `dev_pops`). Without a valid PoP no vote verifies, so the shadow path
-        // would silently produce nothing.
-        if !self.dev_pops.is_empty() {
-            for authority in &mut set.authorities {
-                if !pop_verify(&authority.bls_public_key, &authority.proof_of_possession) {
-                    let found = self
-                        .dev_pops
-                        .iter()
-                        .find(|(pk, _)| *pk == authority.bls_public_key);
-                    if let Some((_, pop)) = found {
-                        authority.proof_of_possession = *pop;
-                    }
-                }
-            }
+        // The runtime can only build the *current* set, so a rotated-out set is
+        // served from the snapshot captured while it was active.
+        if self.current_set_id() == Some(set_id) {
+            let at = self.client.info().best_hash;
+            let set = self
+                .client
+                .runtime_api()
+                .fast_finality_authorities(at, set_id)
+                .ok()
+                .flatten()?;
+            let set = self.with_dev_pops(set);
+            self.cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(set.clone());
+            return Some(set);
         }
-        Some(set)
+        self.cache.lock().unwrap_or_else(|e| e.into_inner()).get(set_id)
     }
 }
 
@@ -168,6 +232,10 @@ struct FastFinalityEngine<B, C, P, S: ?Sized> {
     client: Arc<C>,
     outbound: futures::channel::mpsc::UnboundedSender<Vec<u8>>,
     genesis_hash: H256,
+    /// F3: the fast-confirmed view this engine feeds (shared with the RPC).
+    view: Arc<FastFinalityView>,
+    /// Last time a "dormant" reason was logged (rate limit).
+    last_dormant_log: Mutex<Option<std::time::Instant>>,
     our_index: Mutex<Option<(u64, H256, u32)>>,
     sent_prepares: Mutex<HashSet<(u64, u32, u32)>>,
     sent_commits: Mutex<HashSet<(u64, u32, u32)>>,
@@ -183,6 +251,18 @@ where
     S: SffSigner + ?Sized + 'static,
     <<B as BlockT>::Header as HeaderT>::Number: Copy + UniqueSaturatedInto<u32>,
 {
+    /// Logs `reason` at most once per `DORMANT_LOG_INTERVAL`. A dormant SFF must
+    /// be visible: "no certificates" is indistinguishable from "broken" without
+    /// this, and silence is the one failure mode operators cannot debug.
+    fn note_dormant(&self, reason: &str) {
+        let mut last = self.last_dormant_log.lock().unwrap_or_else(|e| e.into_inner());
+        let now = std::time::Instant::now();
+        if last.map(|t| now.duration_since(t) >= DORMANT_LOG_INTERVAL).unwrap_or(true) {
+            *last = Some(now);
+            log::warn!(target: "sff", "SFF is dormant: {reason}");
+        }
+    }
+
     /// Returns the current authority snapshot.
     fn current_set(&self) -> Option<FinalityAuthoritySet> {
         let set_id = self.provider.current_set_id()?;
@@ -226,11 +306,17 @@ where
         }
         let set = match self.current_set() {
             Some(s) => s,
-            None => return, // no registered authority set yet
+            None => {
+                self.note_dormant("no SFF authority set available from the runtime");
+                return;
+            }
         };
         let idx = match self.ensure_our_index(&set) {
             Some(i) => i,
-            None => return, // we are not a registered SFF voter
+            None => {
+                self.note_dormant("this node is not a member of the SFF authority set");
+                return;
+            }
         };
         let height: u32 = (*header.number()).unique_saturated_into();
         let block_hash = header.hash();
@@ -313,27 +399,49 @@ where
     /// Sweep all pending votes, form any certificates, drive Commit votes, then
     /// run the observer over newly observed CommitQCs.
     fn aggregation_step(&self) {
-        let set = match self.current_set() {
-            Some(s) => s,
-            None => return,
-        };
-        let keys = self.pool.lock().unwrap().votes_keys();
-        for (set_id, phase, height, round) in keys {
-            if set_id != set.set_id {
-                continue;
-            }
-            let qc = self
-                .pool
-                .lock()
-                .unwrap()
-                .try_build_qc(&set, phase, height, round);
-            if let Some(qc) = qc {
-                self.broadcast(SffMessage::Certificate(qc.clone()));
-                if phase == Phase::Prepare {
-                    self.maybe_commit(&set, &qc);
+        // Only keys whose vote set actually changed since the last attempt.
+        // Aggregating every pending height on every tick costs one BLS
+        // verification per vote, so its cost grows with the backlog — which
+        // makes the confirmation frontier fall further behind the faster it
+        // needs to run (F3 latency analysis, §13.2(b)).
+        let keys = self.pool.lock().unwrap().take_dirty();
+        if !keys.is_empty() {
+            let mut set_ids: Vec<u64> = keys.iter().map(|(set_id, _, _, _)| *set_id).collect();
+            set_ids.sort_unstable();
+            set_ids.dedup();
+            for set_id in set_ids {
+                let Some(set) = self.provider.authorities(set_id) else {
+                    continue;
+                };
+                for (s, phase, height, round) in keys.iter().copied() {
+                    if s != set_id {
+                        continue;
+                    }
+                    let qc = self
+                        .pool
+                        .lock()
+                        .unwrap()
+                        .try_build_qc(&set, phase, height, round);
+                    if let Some(qc) = qc {
+                        log::info!(
+                            target: "sff",
+                            "built {}QC set_id={} height={} round={} block={:?}",
+                            match qc.phase {
+                                sff_primitives::Phase::Prepare => "Prepare",
+                                sff_primitives::Phase::Commit => "Commit",
+                                sff_primitives::Phase::Skip => "Skip",
+                            },
+                            qc.set_id, qc.height, qc.round, qc.block_hash
+                        );
+                        self.broadcast(SffMessage::Certificate(qc.clone()));
+                        if phase == Phase::Prepare {
+                            self.maybe_commit(&set, &qc);
+                        }
+                    }
                 }
             }
         }
+        self.prune_backlog();
         self.observe();
     }
 
@@ -412,73 +520,87 @@ where
         let _ = self.outbound.unbounded_send(msg.encode());
     }
 
-    /// Shadow observer: for each newly observed CommitQC, compare its block to the
-    /// GRANDPA finalized chain. Logs only — never affects finality.
+    /// Drops anything that can no longer usefully complete.
+    ///
+    /// A shadow confirmation for a block already finalized by GRANDPA is worth
+    /// nothing, and keeping un-completable heights in the pool is what turned the
+    /// aggregation cost into O(backlog) (§13.2(b)). So the floor is the GRANDPA
+    /// finalized height: a height is only ever pruned *after* it is final and
+    /// therefore can never still be completing — which is why a fixed tail
+    /// (`best - N`) caused holes (a height pruned before its CommitQC formed).
+    /// The fixed window is only a safety net if GRANDPA stalls further than
+    /// `MAX_BACKLOG_HEIGHTS` behind the tip.
+    fn prune_backlog(&self) {
+        let info = self.client.info();
+        let best: u32 = info.best_number.unique_saturated_into();
+        let finalized: u32 = info.finalized_number.unique_saturated_into();
+        let floor = finalized.min(best.saturating_sub(MAX_BACKLOG_HEIGHTS));
+        let mut pool = self.pool.lock().unwrap();
+        pool.set_floor(floor);
+        pool.prune_below(floor);
+    }
+
+    /// Shadow observer: hand every newly observed CommitQC to the F3 view, which
+    /// classifies it against the GRANDPA finalized chain and decides whether it
+    /// may be published as a fast confirmation. Never affects finality.
     fn observe(&self) {
+        // Drained, not scanned: the observer runs on every aggregation and must
+        // not walk the whole certificate map each time.
         let new: Vec<sff_primitives::QuorumCertificate> = {
-            let pool = self.pool.lock().unwrap();
+            let mut pool = self.pool.lock().unwrap();
             let mut seen = self.seen_commit_heights.lock().unwrap();
-            pool.commit_qc_entries()
+            pool.take_new_commit_qcs()
                 .into_iter()
-                .filter(|(set_id, h, _)| seen.insert((*set_id, *h)))
-                .map(|(_, _, qc)| qc)
+                .filter(|qc| seen.insert((qc.set_id, qc.height)))
                 .collect()
         };
+        if new.is_empty() {
+            return;
+        }
+        let chain = ClientChainView::<C, B>::new(self.client.clone());
         for qc in new {
-            self.compare_to_grandpa(&qc);
+            self.compare_to_grandpa(&qc, &chain);
         }
     }
 
-    fn compare_to_grandpa(&self, qc: &sff_primitives::QuorumCertificate) {
-        let Some(block_hash) = qc.block_hash else {
-            return;
-        };
-        let finalized = self.client.info().finalized_hash;
-        // A QC is on the finalized chain iff its block is an ancestor of the
-        // current GRANDPA finalized head.  The inverse merely says it descends
-        // from finality and may still be reversible.
-        let on_chain = self.is_ancestor_of(finalized, block_hash);
-        if on_chain {
-            log::debug!(
+    fn compare_to_grandpa(&self, qc: &sff_primitives::QuorumCertificate, chain: &dyn ChainView) {
+        let consistency = self.view.observe_commit_qc(qc.clone(), chain);
+        match consistency {
+            Consistency::OnFinalizedChain => log::debug!(
                 target: "sff",
-                "CommitQC height {} block {:?} is on the GRANDPA canon chain",
+                "CommitQC height {} block {:?} is already GRANDPA finalized",
                 qc.height,
                 qc.block_hash
-            );
-        } else {
-            // SFF committed to a block GRANDPA has not finalized (or finalized a
-            // different branch) — a shadow diff to watch, not an error.
-            log::warn!(
+            ),
+            // Normal fast confirmation: SFF is ahead of GRANDPA, which is exactly
+            // what F3 exists to expose. Not a warning.
+            Consistency::AheadOfFinality => log::debug!(
                 target: "sff",
-                "SFF CommitQC height {} block {:?} is NOT on the GRANDPA finalized chain (finalized {:?})",
+                "CommitQC height {} block {:?} is ahead of GRANDPA finalized #{} — fast confirmed \
+                 (revocable)",
                 qc.height,
                 qc.block_hash,
-                finalized
-            );
+                chain.finalized_number()
+            ),
+            // Divergence: the view stops serving confirmations.
+            Consistency::Conflicting => log::warn!(
+                target: "sff",
+                "SFF CommitQC height {} block {:?} conflicts with the GRANDPA finalized head #{} \
+                 ({:?}) — fast confirmations suspended",
+                qc.height,
+                qc.block_hash,
+                chain.finalized_number(),
+                chain.finalized_hash()
+            ),
+            Consistency::Unknown => log::debug!(
+                target: "sff",
+                "CommitQC height {} block {:?} is not imported locally yet",
+                qc.height,
+                qc.block_hash
+            ),
         }
     }
 
-    /// Walks up `candidate`'s ancestry looking for `ancestor`.
-    fn is_ancestor_of(&self, mut candidate: H256, ancestor: H256) -> bool {
-        if candidate == ancestor {
-            return true;
-        }
-        for _ in 0..256 {
-            let hdr = match self.client.header(candidate) {
-                Ok(Some(h)) => h,
-                _ => return false,
-            };
-            let parent = *hdr.parent_hash();
-            if parent == ancestor {
-                return true;
-            }
-            if parent == candidate {
-                return false;
-            }
-            candidate = parent;
-        }
-        false
-    }
 }
 
 fn claim_prepare(
@@ -535,6 +657,32 @@ mod tests {
             .is_none());
     }
 
+    fn test_set(set_id: u64) -> FinalityAuthoritySet {
+        FinalityAuthoritySet::new(set_id, 0, Vec::new()).expect("empty set is valid")
+    }
+
+    #[test]
+    fn set_cache_keeps_rotated_out_snapshots_within_its_bound() {
+        let mut cache = SetCache::default();
+        for set_id in 0..(MAX_CACHED_SETS as u64 + 4) {
+            cache.insert(test_set(set_id));
+        }
+        assert_eq!(cache.len(), MAX_CACHED_SETS);
+        // The oldest sets were evicted, the most recent ones are still served —
+        // which is what lets an in-flight certificate finish after a rotation.
+        assert!(cache.get(0).is_none());
+        assert!(cache.get(MAX_CACHED_SETS as u64 + 3).is_some());
+    }
+
+    #[test]
+    fn set_cache_is_idempotent_per_set_id() {
+        let mut cache = SetCache::default();
+        cache.insert(test_set(7));
+        cache.insert(test_set(7));
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.get(7).map(|s| s.set_id), Some(7));
+    }
+
     #[test]
     fn prepare_guard_allows_only_one_target_per_set_height_round() {
         let sent = Mutex::new(HashSet::new());
@@ -554,6 +702,7 @@ pub async fn run_fast_finality<B, C, P, S>(
     client: Arc<C>,
     outbound: futures::channel::mpsc::UnboundedSender<Vec<u8>>,
     genesis_hash: H256,
+    view: Arc<FastFinalityView>,
     mut import_stream: impl Stream<Item = BlockImportNotification<B>> + Unpin + Send + 'static,
 ) where
     B: BlockT<Hash = H256>,
@@ -562,6 +711,11 @@ pub async fn run_fast_finality<B, C, P, S>(
     S: SffSigner + ?Sized + 'static,
     <<B as BlockT>::Header as HeaderT>::Number: Copy + UniqueSaturatedInto<u32>,
 {
+    let notify = Arc::new(Notify::new());
+    pool.lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .set_waker(notify.clone());
+
     let engine = FastFinalityEngine::<B, C, P, S> {
         provider,
         signer,
@@ -569,6 +723,8 @@ pub async fn run_fast_finality<B, C, P, S>(
         client,
         outbound,
         genesis_hash,
+        view,
+        last_dormant_log: Mutex::new(None),
         our_index: Mutex::new(None),
         sent_prepares: Mutex::new(HashSet::new()),
         sent_commits: Mutex::new(HashSet::new()),
@@ -578,7 +734,9 @@ pub async fn run_fast_finality<B, C, P, S>(
 
     log::info!(target: "sff", "SFF shadow engine started (genesis {genesis_hash})");
 
-    let mut timer = interval(Duration::from_millis(200));
+    // Aggregation is event-driven (the pool notifies on every insert); the timer
+    // is only a safety net for pruning and anything that slipped through.
+    let mut timer = interval(Duration::from_millis(1_000));
     loop {
         tokio::select! {
             notif = import_stream.next() => {
@@ -586,6 +744,9 @@ pub async fn run_fast_finality<B, C, P, S>(
                     Some(n) => engine.on_block_imported(&n.header, n.is_new_best),
                     None => break, // stream ended
                 }
+            }
+            _ = notify.notified() => {
+                engine.aggregation_step();
             }
             _ = timer.tick() => {
                 engine.aggregation_step();

@@ -519,6 +519,11 @@ pub async fn new_full_base<N: NetworkBackend<Block, <Block as sp_runtime::traits
     // SFF (F2) uses it to derive the dev node's shadow BLS key; a real (non-dev)
     // deployment leaves it `None` and signs through the keystore instead.
     let sff_dev_key_seed = config.dev_key_seed.clone();
+    // F3: the fast-confirmed view. The shadow engine writes it, the RPC reads it,
+    // so both need the same handle.
+    let sff_view = std::sync::Arc::new(crate::fast_finality_view::FastFinalityView::new());
+    // The RPC closure is `move`, so it needs its own handle to the same view.
+    let sff_view_rpc = sff_view.clone();
 
     let is_offchain_indexing_enabled = config.offchain_worker.indexing_enabled;
     let role = config.role;
@@ -787,6 +792,7 @@ pub async fn new_full_base<N: NetworkBackend<Block, <Block as sp_runtime::traits
                     eth: eth_deps,
                     exchange_pool: exchange_pool_rpc.clone(),
                     exchange_outbound: exchange_outbound.clone(),
+                    sff_view: sff_view_rpc.clone(),
                 };
 
                 // node_rpc::create_full(deps).map_err(Into::into)
@@ -1117,6 +1123,7 @@ pub async fn new_full_base<N: NetworkBackend<Block, <Block as sp_runtime::traits
                         client,
                         sff_outbound,
                         genesis_hash,
+                        sff_view,
                         import_stream,
                     )
                     .await;

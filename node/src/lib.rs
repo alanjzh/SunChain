@@ -20,6 +20,7 @@ mod exchange_proposer;
 mod fast_finality_p2p;
 mod fast_finality_pool;
 mod fast_finality;
+mod fast_finality_view;
 
 pub fn initialize(args: Vec<String>) -> Result<(), String> {
     let _ = command::run(Some(args));

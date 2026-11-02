@@ -111,7 +111,7 @@ serde_json = { workspace = true, default-features = true }
 # `gzip`: the full-book endpoints answer ~1.9 MB uncompressed and ~284 kB gzipped, and
 # reqwest does not enable compression by default.
 reqwest = { version = "0.11", default-features = false, features = ["rustls-tls", "json", "blocking", "gzip"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
 thiserror = "1.0"
 
 sc-authority-discovery.workspace = true

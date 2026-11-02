@@ -458,4 +458,199 @@ SFF keystore signing failed: Key not supported: KeyTypeId([115, 102, 102, 98])
 4. **`activation_block` 未记账**：runtime 端未跟踪 session 激活块，填 `0`（仅影响集合标识 tuple，节点重导）。
 5. **端到端验证范围**：dev 两节点已跑通 vote→PrepareQC→CommitQC→observer 对照 GRANDPA（§11.1，0 验签失败 / 0 panic，GRANDPA 未受影响）。但**生产路径仍未验证**：`register_bls_key` 尚未在链上真实注册（dev 走的是未登记回落分支），且 `KeystoreSffSigner` 曾因 `Arc<dyn Keystore>` 未转发而全量失败（§11.2）。设计 §9.4 的完整影子流程需在带真实 BLS key 注册 + keystore signer 的两验证人链上复验。
 6. **启用条件**：每个当选验证人的当前 `NextKeys.sffb` 必须非零，并且 `pallet_fast_finality::BlsKeys` 中登记的公钥及 PoP 与该 session key 匹配；否则 authority set 不完整，`FastFinalityApi` 返回 `None`，SFF 静默 dormant（observer 仍运行但无 QC）。
-7. **observer 对照为单向告警**：SFF CommitQC 的区块不在 GRANDPA finalized 链上时记 `warn`（reorg 或 SFF 领先分支），不影响最终性——这是设计预期的安全旁路，非错误。
+7. **observer 对照已升级为四分类（F3）**：原实现只有"在/不在 finalized 链上"两态，把正常的"SFF 领先"当告警。现按 §12 分为 `onFinalizedChain` / `aheadOfFinality`（正常快速确认）/ `conflicting`（分叉，停发并告警）/ `unknown`；只有 `conflicting` 记 `warn`。Dormant（runtime 给不出 authority set）也有限速日志，便于与"坏了"区分。
+
+## 12. F3 实现状态（2026-11-02）
+
+F3 把 F2 的 CommitQC 变成对外可读的 **fast confirmation**：`node/src/fast_finality_view.rs`
+（状态机）+ `node/src/rpc/sff.rs`（RPC/WS）+ 引擎/observer 接线。GRANDPA 仍是权威最终性；
+所有对外字段都显式标注"可撤销"，清算/提款/桥/资产会计必须继续等 GRANDPA（F3 gate）。
+
+### 12.1 一致性规则（设计 §4.6 F3 行）
+
+每个 CommitQC 按它与 GRANDPA finalized 链的祖先关系分类，只有前两类会被发布：
+
+| 分类 | 含义 | 行为 |
+|---|---|---|
+| `onFinalizedChain` | QC 区块就是 finalized head 或其祖先 | 发布，`grandpaFinalized=true`、`revocable=false` |
+| `aheadOfFinality` | finalized head 是 QC 区块的祖先（SFF 领先） | 发布，`revocable=true`（这才是 fast-confirmed 的正常态） |
+| `conflicting` | QC 区块在 GRANDPA 没终局的分支上 | **停发**，`degraded=true`，记录 `lastConflict` 供下游回滚 |
+| `unknown` | 区块本地还没导入 | 不发布 |
+
+关键点：
+- **发布前每次查询都会重新校验**（`revalidate`）。已经发布的确认若被重组掉（不再是 finalized 链祖先/后代），会立刻降级并停发 —— 这是给 indexer/钱包/explorer 的 reorg 接口。
+- 一致后自动恢复服务，但 `conflicts` 计数与 `lastConflict` **保留**，下游仍可据此回滚。
+- `revision` 单调递增，WS 订阅只在它变化时推送，消费者不必轮询比对 payload。
+
+### 12.2 对外接口（`node/src/rpc/sff.rs`）
+
+| 方法 | 返回 |
+|---|---|
+| `sff_status` | `phase / serving / degraded / degradeReason / conflicts / lastConflict / fastConfirmedHeight / grandpaFinalizedNumber / revision / warning` |
+| `sff_fastConfirmedHead` | 当前快速确认头（含 `consistency`、`grandpaFinalized`、`revocable`、`warning`），停发或无证书时为 `null` |
+| `sff_certificate(height)` | 该高度的 CommitQC（有界历史 128 条），无则 `null` |
+| `sff_subscribeFastConfirmed` (WS) | 状态变化推送（新确认 / GRANDPA 追上 / 降级 / 恢复） |
+
+`warning` 字段恒非空：`"fast confirmation is revocable: GRANDPA remains the authoritative
+finality; clearing, withdrawals, bridges and asset accounting must wait for GRANDPA finalized"`。
+
+### 12.3 本轮顺带修掉的吞吐问题
+
+先前 SFF 的确认高度会**完全卡死**（停在 #47 不再前进）。根因：vote 绑定 `(set_id, snapshot_root)`，
+而 runtime 只能构造**当前** set（session 轮换后 session key 变了），因此：
+
+- gossip `validate` 对旧 set 的 vote 一律 `authorities(old) = None` → 丢弃；
+- 聚合只处理当前 set 的 key → 轮换时在途的 Prepare/Commit 全部作废。
+
+dev 链 session 极短（约 30–48 块一轮换），于是大多数高度来不及完成两阶段。
+
+修复：`RuntimeAuthorityProvider` 增加**有界快照缓存**（`SetCache`，上限 8 个 set，按插入顺序淘汰），
+聚合遍历所有仍可解析的 set（含刚轮换出的）。缓存只在 set 仍为当前时从 runtime 读取并写入，
+旧 set 只读缓存；RPC/gossip/引擎三条路径共用。有界，长轮换历史不会让它增长。
+
+效果（dev 两节点，同一脚本）：修复前 sff 高度停在 #47 且 revision 冻结；修复后持续推进
+（sff #71→#78，revision 38→44），两节点的投票/QC 数量也从 92:68、1:46 的不对称收敛到
+82:82、23:14。
+
+### 12.4 验证
+
+**单测**：`cargo test -p sunchain --bin sunchain fast_finality` 14 项通过，其中 6 项是 F3 新增
+（`consistency_classifies_finalized_ahead_and_conflicting`、`ahead_of_finality_is_served_but_revocable`、
+`conflicting_commit_degrades_and_stops_serving`、`a_served_head_that_is_reorged_away_degrades`、
+`serving_resumes_after_a_divergence_but_keeps_the_audit_trail`、`history_is_bounded…`）
++ 2 项 `SetCache` 边界测试。
+
+**dev 两节点实跑**（`--chain dev --alice/--bob --validator`）：
+
+```jsonc
+// sff_status
+{ "phase": "f3-fast-confirmed", "serving": true, "degraded": false, "conflicts": 0,
+  "fastConfirmedHeight": 76, "grandpaFinalizedNumber": 107, "revision": 40,
+  "warning": "fast confirmation is revocable: GRANDPA remains the authoritative finality; ..." }
+
+// sff_fastConfirmedHead
+{ "height": 70, "setId": 2, "consistency": "onFinalizedChain",
+  "grandpaFinalized": true, "revocable": false,
+  "warning": "finalized by GRANDPA: irreversible" }
+```
+
+- `sff_certificate(42)` 返回该高度 CommitQC；`sff_certificate(9999)` → `null`。
+- WS 订阅实测收到推送（`subscription id` + `rev=21 serving=True height=70 finalized=#178`）。
+- 全程 `SFF keystore signing failed` 0 次、验签失败 0 次、panic 0 次、conflicts 0，GRANDPA 正常终局。
+
+### 12.5 F3 已知限制
+
+1. **dev 上 fast-confirmed 仍落后 GRANDPA 约 30 块**（sff #78 vs finalized #119），即现在还**没有**体现延迟优势；两阶段（Prepare→Commit）串行 + 2/2 门槛 + 200ms 聚合节拍是主因。shadow 模式下无安全影响，但 F3 的价值要等 F2 的延迟 gate（primary/backup fanout、聚合节拍）做完才成立。
+2. **下游尚未接入**：设计里"DEX UI 显示 fast-confirmed、清算/提款仍等 GRANDPA"属于消费方工作，未做；本轮只提供接口与风险标识。
+3. 生产 `register_bls_key` 仍未真实注册（dev 走未登记回落分支），见 §11 已知偏离 5。
+4. 快照缓存让节点在 set 轮换后仍可用**旧快照**完成/验证证书；上限 8 个 set，超过即淘汰。这是可用性与"runtime 只认当前 set"之间的权衡，生产 session 很长时不触发。
+
+## 13. F3 延迟分析：为什么 fast-confirmed 落后 GRANDPA（2026-11-02）
+
+F3 的接口与安全语义已完成，但**它现在比 GRANDPA 慢**，因此还没有兑现"低延迟确认"的价值。
+本章记录成因、量化数据与待办，作为 F2 延迟 gate（设计 §6）的工作清单。
+
+### 13.1 实测数据（dev 两节点，debug 构建）
+
+| 指标 | 实测 |
+|---|---|
+| 出块间隔 | ≈ 2.9 s / 块 |
+| SFF 单高度完成耗时 | ≈ 8.6 s / 高度（71→78 用了一分钟） |
+| 落后量 | 跑 6 分钟后 fast-confirmed #78 vs GRANDPA #119（落后 41 块，且持续扩大） |
+| 投票/成证率 | 114 个块中签 82 张 Prepare 票（72%），最终 23 个 QC（≈20%） |
+| 修复前 | fast-confirmed **冻结**在 #47 不动（GRANDPA 到 #160） |
+
+### 13.2 成因
+
+**(a) 结构性：逐高度确认 vs 一轮终局一段链。** GRANDPA 一轮 precommit 终局"最优链上尽可能高的
+祖先"，一次吃掉几十个块，并有 catch-up 消化积压。我们的 `fast_confirmed_height` 是"已完成的最高
+高度"，每个高度各自跑一遍 Prepare→Commit，且**没有追赶机制**——一旦落后只能以同样速率追，永远追不回。
+
+**(b) 主因：全量轮询聚合，成本随积压增长（正反馈）。** `run_fast_finality` 每 200 ms 遍历池里
+**所有**未完成的 `(set, phase, height, round)` 调 `try_build_qc`；而 `sff_crypto::aggregate_votes`
+对**每一张票**重新做一次 BLS 验签（`verify_vote`）。于是
+
+```text
+单次聚合成本 ≈ 积压高度数 × 每张票的 BLS 配对验签名
+```
+
+名义 200 ms 的周期变成 `200ms + 全量扫描`，积压越长越慢 → 越慢积压越长 → **正反馈**；极端表现就是
+"冻结在 #47"。debug 构建的 BLS 配对比 release 慢一个量级，放大了系数，但 O(积压) 的结构不变。
+
+**(c) 两阶段串行，且每次都要等一个聚合周期 + 一跳 gossip。** 高度 h 的时间线是
+Prepare 票 →（等 tick）→ PrepareQC → Commit 票 →（等 tick）→ CommitQC，中间没有流水线。
+GRANDPA 的 prevote/precommit 在同一轮内由消息事件直接驱动，不等定时器。
+
+**(d) 空洞不补。** `on_block_imported` 只在 `is_new_best` 时投票，`claim_prepare` 对
+`(set,height,round)` 只认一次、永不重投；两节点链上乱序到达（块 100 先到、99 后到）会让高度永久
+缺票。再加**没有轮次推进 / Skip 票**（`round` 恒为 0）、**Repair 从不发送**（`repair_for` 是
+`#[allow(dead_code)]`），空洞既不推进也不修复。这解释了 82→23 的乘法衰减。
+
+**(e) 没有 leader / Rotor / 批量。** Alpenglow 快的两大来源缺失，对比：
+
+| Alpenglow | 当前实现 |
+|---|---|
+| Votor：leader 聚合，单点产出证书 | 每个节点独立对全部积压做全量聚合 |
+| Rotor：纠删码分片 + 抽样委员会中继，单跳扇出 | flood-fill 广播给所有 peer，且**中继前先做 BLS 验签**（每跳付费） |
+| primary + backup 冗余发送，抗慢/丢包 | 单路径，丢包即空洞（见 d） |
+| 一轮终局一批块 | 逐高度；每块每节点 2 条消息（4 条/块） |
+
+### 13.3 待办（按优先级）
+
+**P0 — 先把单高度成本从 O(积压) 降到 O(1)（切断正反馈）**
+
+- [x] 1. **事件驱动聚合**：`FastFinalityPool::take_dirty()` 只返回"票集合自上次尝试后变化过的 key"；`run_fast_finality` 用 `tokio::Notify` 在每次插入时唤醒引擎，200 ms 定时器降级为裁剪/兜底的安全网。
+- [x] 2. **增量聚合**：`aggregate_votes` 对每张票的重验只发生在该 key 的 dirty 周期内；`add_vote` 写入即 `dirty.insert` + `notify`，`take_dirty` 抽取后清空，未变化的 key 不再进入 BLS 验签路径。
+- [x] 3. **积压上限**：`MAX_BACKLOG_HEIGHTS = 64` 作为安全网；`prune_backlog()` 每节拍按 `finalized.min(best - 64)` 设 floor 并 `prune_below`（裁剪到 GRANDPA 终界，而非固定尾部，避免提前丢弃未完成高度），旧高度的票/证书/去重键一并丢弃；`add_vote` 直接拒收 `height < floor` 的票。
+
+**P1 — 协议完整性（决定"会不会卡住"）**
+
+- [ ] 4. 批量确认：一次确认到某个高度（对齐 GRANDPA 一次终局一批）。
+- [ ] 5. 轮次推进与 Skip 票（`round` 现在恒为 0，高度拿不到法定人数就永远不动）。
+- [ ] 6. 主动 Repair（`repair_for` 目前是死代码，丢票/丢证书永不恢复）。
+- [ ] 7. 非 `new-best` 区块补投 / catch-up，消除 (d) 的永久空洞。
+
+**P2 — 规模化（验证人数量上百后才必需）**
+
+- [ ] 8. Leader/primary 聚合 + primary/backup fanout。
+- [ ] 9. Rotor 式纠删码分发、票打包压缩。
+
+**F3 侧遗留**
+
+- [ ] 10. 下游接入：DEX UI / 钱包显示 fast-confirmed，清算提款仍等 GRANDPA。
+- [ ] 11. 生产 `register_bls_key` 真实注册（dev 走未登记回落分支）。
+
+### 13.4 验收标准
+
+| 项 | 验收 |
+|---|---|
+| 1+2+3 | dev 两节点上 `fastConfirmedHeight` 与 `grandpaFinalizedNumber` 的差距**收敛且不再扩大**；聚合 CPU 不再随积压增长；不再出现高度冻结 |
+| 5/6/7 | 连续运行 30 分钟无永久空洞（每个高度最终都有 PrepareQC 或被显式放弃） |
+| 4/8/9 | p95 确认延迟优于 GRANDPA（设计 §6 F2 延迟 gate） |
+
+以上全部处于 shadow 模式：不影响 BABE 出块、不影响 GRANDPA 终局、无安全后果——只是 F3 承诺的
+低延迟尚未兑现。
+
+### 13.5 P0 实测结果（2026-11-02）
+
+重新构建并跑通 1+2+3 后，dev 两节点（`--chain dev --alice/--bob`）表现：
+
+| 指标 | 修复前（§13.1） | 修复后（P0） |
+|---|---|---|
+| `fastConfirmedHeight` vs `grandpaFinalizedNumber` | 落后 41 块且持续扩大 | **领先 1 块**（`aheadOfFinality`，revocable） |
+| 单高度完成耗时 | ≈ 8.6 s / 高度 | 追平出块节拍（128 个近期高度连续完成） |
+| 高度冻结 | 有（卡在 #47） | 无 |
+| 近期窗口完成密度 | 约 20% | 126/128（仅 2 个空洞，源于丢票） |
+| 签名失败 / 验签失败 / panic | 0 / 0 / 0 | 0 / 0 / 0 |
+| 一致性分类 | — | `aheadOfFinality` 实测出现（`sff_fastConfirmedHead` 返回 `revocable=true`） |
+
+**结论**：§13.2(b) 的正反馈被切断——聚合成本从 O(积压) 回到 O(每 tick 的脏 key)，确认前沿随出块持续推进并反超 GRANDPA。这同时满足 design §6 F2 延迟 gate 的"收敛且不再扩大"验收项：F3 的快速确认现在**真实成立**（实测 SFF #140 vs GRANDPA finalized #138，SFF 领先 2 块）。
+
+**空洞消除（P0 收尾）**：首轮修复后仍有 2/128 空洞，根因不是丢票，而是 `floor = best - 64` 的**固定尾部裁剪**会在某高度凑齐 CommitQC 之前就把它 prune 掉（被裁的高度早已被 GRANDPA 终局，却从未形成过证书）。把裁剪策略改为 **floor = GRANDPA 终界**（仅在 GRANDPA 滞后超过 `MAX_BACKLOG_HEIGHTS` 时才退化为固定窗口）后，再次实测：活跃窗口 77..140 **64/64 连续、0 空洞**，仅 height 5（启动 warmup 残留，已远超终界、无害）一个早期空洞。 backlog 仍被终界差有界，O(积压) 不会复发。
+
+**仍明确的限制**
+
+- dev（2 验证人）下 GRANDPA 本身极快（2/2 即终局），所以 SFF 只领先 1–2 块；在更大网络里 GRANDPA
+  延迟随规模上升而 SFF 两阶段近似恒定，领先量会更大——但这需要用多验证人网络实测才能量化。
+- 主动 Repair（P1-6）的**接收/应答侧**已在 `fast_finality_p2p.rs` 就绪（`RepairRequest` + `answer_repair`），但引擎从不发送；由于裁剪策略已消除绝大多数空洞，其优先级下降，仅在出现真实丢票时才需要补齐发起侧。
+- P1（轮次推进 / Skip / 批量 / leader / Rotor）尚未做，决定规模化后的延迟与吞吐上限。

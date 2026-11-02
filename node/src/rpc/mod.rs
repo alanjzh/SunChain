@@ -33,6 +33,7 @@
 
 mod eth;
 pub mod exchange;
+pub mod sff;
 pub mod sunlead;
 pub use eth::*;
 use sp_inherents::CreateInherentDataProviders;
@@ -134,6 +135,8 @@ pub struct FullDeps<C, P, SC, B, CT, CIDP> {
     pub exchange_pool: Arc<std::sync::Mutex<crate::exchange_pool::ExchangePool>>,
     /// Sink for actions accepted locally, consumed by the gossip task.
     pub exchange_outbound: futures::channel::mpsc::UnboundedSender<Vec<u8>>,
+    /// SFF F3 fast-confirmed view, shared with the shadow engine.
+    pub sff_view: Arc<crate::fast_finality_view::FastFinalityView>,
 }
 
 pub struct DefaultEthConfig<C, BE>(std::marker::PhantomData<(C, BE)>);
@@ -227,8 +230,12 @@ where
         eth,
         exchange_pool,
         exchange_outbound,
+        sff_view,
     } = deps;
     let mut io = RpcModule::new(());
+    // The eth extensions take ownership of the executor; the SFF subscription
+    // needs its own handle.
+    let sff_subscription_executor = subscription_task_executor.clone();
 
     let GrandpaDeps {
         shared_voter_state,
@@ -370,6 +377,12 @@ where
     )?;
 
     io.merge(SunLeadRpc::<C>::new(client.clone()).into_rpc())?;
+
+    // SFF F3: fast confirmation, openly labelled as revocable.
+    use crate::rpc::sff::{SffRpc, SffRpcApiServer};
+    io.merge(
+        SffRpc::<C>::new(client.clone(), sff_view, sff_subscription_executor).into_rpc(),
+    )?;
 
     Ok(io)
 }
