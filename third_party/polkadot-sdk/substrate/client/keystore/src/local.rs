@@ -47,6 +47,67 @@ use crate::{Error, Result};
 pub struct LocalKeystore(RwLock<KeystoreInner>);
 
 impl LocalKeystore {
+	fn sff_effective_seed(&self, seed: &[u8; 32]) -> [u8; 32] {
+		let guard = self.0.read();
+		if let Some(password) = guard.password() {
+			let mut material = Vec::with_capacity(seed.len() + password.len());
+			material.extend_from_slice(seed);
+			material.extend_from_slice(password.as_bytes());
+			sp_core::hashing::blake2_256(&material)
+		} else {
+			*seed
+		}
+	}
+
+	/// Return public keys stored under the SFF key type after validating their encoding.
+	pub fn sff_public_keys(
+		&self,
+		key_type: KeyTypeId,
+	) -> Result<Vec<sff_primitives::BlsPublicKey>> {
+		Ok(self
+			.0
+			.read()
+			.raw_public_keys(key_type)?
+			.into_iter()
+			.filter_map(|bytes| sff_primitives::BlsPublicKey::from_bytes(&bytes))
+			.collect())
+	}
+
+	/// Sign with an SFF key without exposing its stored seed to the caller.
+	fn sff_pair(
+		&self,
+		key_type: KeyTypeId,
+		public: &sff_primitives::BlsPublicKey,
+	) -> Result<Option<sff_crypto::BlsKeypair>> {
+		let Some(suri) = self.0.read().key_phrase_by_type(&public.0, key_type)? else {
+			return Ok(None)
+		};
+		let Some(hex) = suri.strip_prefix("0x") else { return Err(Error::InvalidPhrase) };
+		if hex.len() != 64 {
+			return Err(Error::InvalidPhrase)
+		}
+		let mut seed = [0u8; 32];
+		for (i, pair) in hex.as_bytes().chunks_exact(2).enumerate() {
+			let digit = |b: u8| -> Option<u8> {
+				match b {
+					b'0'..=b'9' => Some(b - b'0'),
+					b'a'..=b'f' => Some(b - b'a' + 10),
+					b'A'..=b'F' => Some(b - b'A' + 10),
+					_ => None,
+				}
+			};
+			seed[i] = digit(pair[0])
+				.and_then(|h| digit(pair[1]).map(|l| (h << 4) | l))
+				.ok_or(Error::InvalidPhrase)?;
+		}
+		let effective_seed = self.sff_effective_seed(&seed);
+		let pair = sff_crypto::BlsKeypair::from_seed(&effective_seed);
+		if pair.public() != *public {
+			return Err(Error::PublicKeyMismatch)
+		}
+		Ok(Some(pair))
+	}
+
 	/// Create a local keystore from filesystem.
 	///
 	/// The keystore will be created at `path`. The keystore optionally supports to encrypt/decrypt
@@ -183,6 +244,66 @@ impl Keystore for LocalKeystore {
 		public_keys
 			.iter()
 			.all(|(p, t)| self.0.read().key_phrase_by_type(p, *t).ok().flatten().is_some())
+	}
+
+	fn sff_sign(
+		&self,
+		key_type: KeyTypeId,
+		public: &[u8],
+		message: &[u8],
+	) -> std::result::Result<Option<Vec<u8>>, TraitError> {
+		let Some(public) = sff_primitives::BlsPublicKey::from_bytes(public) else {
+			return Err(TraitError::ValidationError("invalid SFF public key encoding".into()))
+		};
+		let signature = self
+			.sff_pair(key_type, &public)
+			.map_err(|e| TraitError::Other(e.to_string()))?
+			.map(|pair| sff_crypto::sign(&pair, message).0.to_vec());
+		Ok(signature)
+	}
+
+	fn sff_generate_proof_of_possession(
+		&self,
+		key_type: KeyTypeId,
+		public: &[u8],
+	) -> std::result::Result<Option<Vec<u8>>, TraitError> {
+		let Some(public) = sff_primitives::BlsPublicKey::from_bytes(public) else {
+			return Err(TraitError::ValidationError("invalid SFF public key encoding".into()))
+		};
+		let pop = self
+			.sff_pair(key_type, &public)
+			.map_err(|e| TraitError::Other(e.to_string()))?
+			.map(|pair| sff_crypto::pop_sign(&pair).0.to_vec());
+		Ok(pop)
+	}
+
+	fn sff_generate_new(
+		&self,
+		key_type: KeyTypeId,
+		seed: Option<&[u8]>,
+	) -> std::result::Result<Vec<u8>, TraitError> {
+		let seed = match seed {
+			Some(seed) => sp_core::hashing::blake2_256(seed),
+			None => sp_core::sr25519::Pair::generate().1,
+		};
+		let effective_seed = self.sff_effective_seed(&seed);
+		let pair = sff_crypto::BlsKeypair::from_seed(&effective_seed);
+		let mut suri = String::from("0x");
+		for byte in seed {
+			use std::fmt::Write;
+			let _ = write!(suri, "{byte:02x}");
+		}
+		self.insert(key_type, &suri, &pair.public().0)
+			.map_err(|_| TraitError::Other("failed to persist SFF secret key".into()))?;
+		// An in-memory keystore has no file to read the seed back from; keep the seed in the
+		// ephemeral map so `sff_sign` / `sff_generate_proof_of_possession` can still resolve it.
+		{
+			let mut guard = self.0.write();
+			if guard.path.is_none() {
+				guard.insert_ephemeral_seed(key_type, &pair.public().0, &suri);
+			}
+		}
+		Ok(pair.public().0.to_vec())
 	}
 
 	fn sr25519_public_keys(&self, key_type: KeyTypeId) -> Vec<sr25519::Public> {
@@ -494,6 +615,16 @@ impl KeystoreInner {
 		self.additional.insert(key, seed.into());
 	}
 
+	/// Insert the given public key / seed pair with the given key type.
+	///
+	/// Does not place it into the file system store. This is the escape hatch for key types
+	/// whose secret cannot be expressed as a `CorePair` (currently SFF/BLS): an in-memory
+	/// keystore has no file to read the seed back from, so without this entry a freshly
+	/// generated key would be advertised by `keys()` but unusable for signing.
+	fn insert_ephemeral_seed(&mut self, key_type: KeyTypeId, public: &[u8], seed: &str) {
+		self.additional.insert((key_type, public.to_vec()), seed.into());
+	}
+
 	/// Insert a new key with anonymous crypto.
 	///
 	/// Places it into the file system store, if a path is configured.
@@ -705,6 +836,103 @@ mod tests {
 		],));
 
 		assert!(store.has_keys(&[(key.public().to_raw_vec(), ed25519::AppPublic::ID)]));
+	}
+
+	#[test]
+	fn sff_key_generation_signing_pop_and_password_round_trip() {
+		use sff_crypto::{pop_verify, verify};
+		use sff_primitives::BlsPublicKey;
+		use sp_core::crypto::SecretString;
+		use std::str::FromStr;
+
+		let temp_dir = TempDir::new().unwrap();
+		let password = SecretString::from_str("sff-keystore-test-password").unwrap();
+		let store = LocalKeystore::open(temp_dir.path(), Some(password)).unwrap();
+		let key_type = KeyTypeId(*b"sffb");
+		let encoded_public =
+			store.sff_generate_new(key_type, Some(b"stable test entropy")).unwrap();
+		let public = BlsPublicKey::from_bytes(&encoded_public).unwrap();
+		assert_eq!(store.keys(key_type).unwrap(), vec![encoded_public.clone()]);
+
+		let message = b"SFF keystore signing test";
+		let signature = store.sff_sign(key_type, &encoded_public, message).unwrap().unwrap();
+		let signature = sff_primitives::BlsSignature::from_bytes(&signature).unwrap();
+		assert!(verify(&public, message, &signature));
+		let mut altered_signature = signature;
+		altered_signature.0[0] ^= 1;
+		assert!(!verify(&public, message, &altered_signature));
+		let pop = store
+			.sff_generate_proof_of_possession(key_type, &encoded_public)
+			.unwrap()
+			.unwrap();
+		assert!(pop_verify(&public, &sff_primitives::BlsSignature::from_bytes(&pop).unwrap()));
+
+		let other_public = sff_crypto::BlsKeypair::from_seed(&[0x73; 32]).public();
+		assert_eq!(store.sff_sign(key_type, &other_public.0, message).unwrap(), None);
+		assert!(store.sff_sign(key_type, &[], message).is_err());
+
+		let wrong_password = SecretString::from_str("wrong-password").unwrap();
+		let reopened = LocalKeystore::open(temp_dir.path(), Some(wrong_password)).unwrap();
+		assert!(reopened.sff_sign(key_type, &encoded_public, message).is_err());
+
+		let unsupported = sp_keystore::testing::MemoryKeystore::new();
+		assert!(matches!(
+			unsupported.sff_generate_new(key_type, None),
+			Err(TraitError::KeyNotSupported(id)) if id == key_type
+		));
+	}
+
+	/// The node hands out `KeystorePtr` (`Arc<dyn Keystore>`), so the SFF operations must be
+	/// forwarded by the shared-pointer impl instead of falling back to the trait default
+	/// (which answers `KeyNotSupported` for every key type).
+	#[test]
+	fn sff_operations_are_forwarded_through_a_shared_keystore_ptr() {
+		use sff_crypto::{pop_verify, verify};
+		use sff_primitives::BlsPublicKey;
+
+		let temp_dir = TempDir::new().unwrap();
+		let store: KeystorePtr = Arc::new(LocalKeystore::open(temp_dir.path(), None).unwrap());
+		let key_type = KeyTypeId(*b"sffb");
+		let encoded_public =
+			store.sff_generate_new(key_type, Some(b"shared keystore entropy")).unwrap();
+		let public = BlsPublicKey::from_bytes(&encoded_public).unwrap();
+		assert_eq!(store.keys(key_type).unwrap(), vec![encoded_public.clone()]);
+
+		let message = b"SFF shared keystore signing";
+		let signature = store
+			.sff_sign(key_type, &encoded_public, message)
+			.unwrap()
+			.expect("shared keystore must forward SFF signing");
+		let signature = sff_primitives::BlsSignature::from_bytes(&signature).unwrap();
+		assert!(verify(&public, message, &signature));
+
+		let pop = store
+			.sff_generate_proof_of_possession(key_type, &encoded_public)
+			.unwrap()
+			.expect("shared keystore must forward SFF PoP generation");
+		assert!(pop_verify(&public, &sff_primitives::BlsSignature::from_bytes(&pop).unwrap()));
+	}
+
+	/// An in-memory keystore has no key file, so the generated seed has to be reachable from the
+	/// ephemeral map — otherwise the key is listed but never signable.
+	#[test]
+	fn sff_signing_works_on_an_in_memory_keystore() {
+		use sff_crypto::verify;
+		use sff_primitives::BlsPublicKey;
+
+		let store = LocalKeystore::in_memory();
+		let key_type = KeyTypeId(*b"sffb");
+		let encoded_public = store.sff_generate_new(key_type, Some(b"in memory entropy")).unwrap();
+		let public = BlsPublicKey::from_bytes(&encoded_public).unwrap();
+		assert_eq!(store.keys(key_type).unwrap(), vec![encoded_public.clone()]);
+
+		let message = b"SFF in-memory keystore signing";
+		let signature = store
+			.sff_sign(key_type, &encoded_public, message)
+			.unwrap()
+			.expect("in-memory keystore must sign with a key it just generated");
+		let signature = sff_primitives::BlsSignature::from_bytes(&signature).unwrap();
+		assert!(verify(&public, message, &signature));
 	}
 
 	#[test]

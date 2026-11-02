@@ -39,11 +39,12 @@ use sp_inherents::CreateInherentDataProviders;
 use std::sync::Arc;
 // use sc_consensus_grandpa_rpc::finality::RpcFinalityProofProvider;
 
-use sunchain_runtime::{opaque::Block, AccountId, Balance, BlockNumber, Hash, Nonce};
 use fc_rpc::pending::ConsensusDataProvider;
-use jsonrpsee::RpcModule;
+use jsonrpsee::{types::ErrorObjectOwned, Extensions, RpcModule};
 use sc_client_api::{backend::StorageProvider, client::BlockchainEvents, AuxStore, UsageProvider};
 use sc_consensus_babe::BabeWorkerHandle;
+use scale_codec::DecodeAll;
+use sunchain_runtime::{opaque::Block, AccountId, Balance, BlockNumber, Hash, Nonce};
 // use sc_consensus_beefy::communication::notification::{
 //     BeefyBestBlockStream, BeefyVersionedFinalityProofStream,
 // };
@@ -55,7 +56,7 @@ pub use sc_rpc::SubscriptionTaskExecutor;
 pub use sc_rpc_api::DenyUnsafe;
 use sc_transaction_pool::{ChainApi, Pool};
 use sc_transaction_pool_api::TransactionPool;
-use sp_api::{CallApiAt, ProvideRuntimeApi};
+use sp_api::{ApiExt, CallApiAt, ProvideRuntimeApi};
 use sp_application_crypto::RuntimeAppPublic;
 use sp_block_builder::BlockBuilder;
 use sp_blockchain::{
@@ -65,10 +66,11 @@ use sp_consensus::SelectChain;
 use sp_consensus_aura::sr25519::AuthorityId as AuraId;
 use sp_consensus_babe::BabeApi;
 //use sp_consensus_beefy::AuthorityIdBound;
-use sp_keystore::KeystorePtr;
+use sp_keystore::{Keystore, KeystorePtr};
 use sp_runtime::traits::{
     Block as BlockT, Hash as HashT, HashingFor, Header as HeaderT, NumberFor,
 };
+use sp_session::SessionKeys as SessionKeysRuntimeApi;
 // use sc_rpc_api::chain::ChainApi;
 // use sc_consensus_grandpa_rpc::GrandpaApi;
 // use sc_transaction_pool::{ChainApi, Pool};
@@ -122,7 +124,7 @@ pub struct FullDeps<C, P, SC, B, CT, CIDP> {
     /// BEEFY specific dependencies.
     // pub beefy: BeefyDeps<AuthorityId>,
     /// Shared statement store reference.
-   // pub statement_store: Arc<dyn sp_statement_store::StatementStore>,
+    // pub statement_store: Arc<dyn sp_statement_store::StatementStore>,
     /// The backend used by the node.
     pub backend: Arc<B>,
     /// Mixnet API.
@@ -177,6 +179,7 @@ where
     C::Api: sc_consensus_babe::BabeApi<Block>,
     C::Api: sunchain_runtime::apis::ExchangeRuntimeApi<Block>,
     C::Api: sunchain_runtime::apis::SunLeadApi<Block>,
+    C::Api: sp_session::SessionKeys<Block>,
     C::Api: BlockBuilder<Block>,
     C::Api: sp_api::ApiExt<Block>,
     C::Api: fp_rpc::ConvertTransactionRuntimeApi<Block>,
@@ -193,19 +196,19 @@ where
     CIDP: CreateInherentDataProviders<Block, ()> + Send + 'static,
     CT: fp_rpc::ConvertTransaction<<Block as BlockT>::Extrinsic> + Send + Sync + 'static,
 {
-   // use mmr_rpc::{Mmr, MmrApiServer};
+    // use mmr_rpc::{Mmr, MmrApiServer};
     use pallet_transaction_payment_rpc::{TransactionPayment, TransactionPaymentApiServer};
     use sc_consensus_babe_rpc::{Babe, BabeApiServer};
-   // use sc_consensus_beefy_rpc::{Beefy, BeefyApiServer};
+    // use sc_consensus_beefy_rpc::{Beefy, BeefyApiServer};
+    use crate::rpc::exchange::{ExchangeApiServer, ExchangeRpc};
+    use crate::rpc::sunlead::{SunLeadRpc, SunLeadRpcApiServer};
     use sc_consensus_grandpa_rpc::{Grandpa, GrandpaApiServer};
     use sc_rpc::{
         dev::{Dev, DevApiServer},
         mixnet::MixnetApiServer,
-       // statement::StatementApiServer,
+        // statement::StatementApiServer,
     };
     use sc_rpc_spec_v2::chain_spec::{ChainSpec, ChainSpecApiServer};
-    use crate::rpc::exchange::{ExchangeApiServer, ExchangeRpc};
-    use crate::rpc::sunlead::{SunLeadRpc, SunLeadRpcApiServer};
     use sc_sync_state_rpc::{SyncState, SyncStateApiServer};
     use substrate_frame_rpc_system::{System, SystemApiServer};
     use substrate_state_trie_migration_rpc::{StateMigration, StateMigrationApiServer};
@@ -214,11 +217,11 @@ where
         pool,
         select_chain,
         chain_spec,
-    
+
         babe,
         grandpa,
-      //  beefy,
-       // statement_store,
+        //  beefy,
+        // statement_store,
         backend,
         // mixnet_api,
         eth,
@@ -242,9 +245,9 @@ where
         .flatten()
         .expect("Genesis block exists; qed");
     let properties = chain_spec.properties();
- //   io.merge(ChainSpec::new(chain_name, genesis_hash, properties).into_rpc())?;
+    //   io.merge(ChainSpec::new(chain_name, genesis_hash, properties).into_rpc())?;
 
-    io.merge(System::new(client.clone(), pool ).into_rpc())?;
+    io.merge(System::new(client.clone(), pool).into_rpc())?;
     // Making synchronous calls in light client freezes the browser currently,
     // more context: https://github.com/paritytech/substrate/pull/3480
     // These RPCs should use an asynchronous caller instead.
@@ -263,6 +266,45 @@ where
         keystore,
         babe_worker_handle,
     } = babe;
+    let sff_client = client.clone();
+    let sff_keystore = keystore.clone();
+    io.register_method(
+        "sff_rotateKeys",
+        move |_, _, ext: &Extensions| -> Result<serde_json::Value, ErrorObjectOwned> {
+            sc_rpc_api::check_if_safe(ext).map_err(ErrorObjectOwned::from)?;
+            let at = sff_client.info().best_hash;
+            let mut runtime_api = sff_client.runtime_api();
+            runtime_api.register_extension(sp_keystore::KeystoreExt::from(sff_keystore.clone()));
+            let encoded_session_keys = runtime_api
+                .generate_session_keys(at, None)
+                .map_err(|error| ErrorObjectOwned::owned(-32001, error.to_string(), None::<()>))?;
+            let session_keys =
+                sunchain_runtime::configs::SessionKeys::decode_all(&mut &encoded_session_keys[..])
+                    .map_err(|error| {
+                        ErrorObjectOwned::owned(-32002, error.to_string(), None::<()>)
+                    })?;
+            let public = session_keys.sffb.0;
+            let pop = sff_keystore
+                .sff_generate_proof_of_possession(sp_core::crypto::KeyTypeId(*b"sffb"), &public.0)
+                .map_err(|error| ErrorObjectOwned::owned(-32003, error.to_string(), None::<()>))?
+                .ok_or_else(|| {
+                    ErrorObjectOwned::owned(-32004, "SFF key missing from keystore", None::<()>)
+                })?;
+            let to_hex = |bytes: &[u8]| -> String {
+                let mut hex = String::from("0x");
+                for byte in bytes {
+                    use std::fmt::Write;
+                    let _ = write!(hex, "{byte:02x}");
+                }
+                hex
+            };
+            Ok(serde_json::json!({
+                "sessionKeys": to_hex(&encoded_session_keys),
+                "sffPublicKey": to_hex(&public.0),
+                "proofOfPossession": to_hex(&pop),
+            }))
+        },
+    )?;
     io.merge(
         Grandpa::new(
             subscription_executor,
@@ -286,15 +328,7 @@ where
             )
             .into_rpc(),
         )?;
-        io.merge(
-            SyncState::new(
-                chain_spec,
-                client.clone(),
-                shared_authority_set,
-                bh,
-            )?
-            .into_rpc(),
-        )?;
+        io.merge(SyncState::new(chain_spec, client.clone(), shared_authority_set, bh)?.into_rpc())?;
     }
 
     // io.merge(StateMigration::new(client.clone(), backend, deny_unsafe).into_rpc())?;
@@ -326,11 +360,14 @@ where
         pending_consenus_data_provider,
     )?;
 
-    io.merge(crate::rpc::exchange::ExchangeRpc::<C, Block>::new(
-        exchange_pool,
-        client.clone(),
-        exchange_outbound,
-    ).into_rpc())?;
+    io.merge(
+        crate::rpc::exchange::ExchangeRpc::<C, Block>::new(
+            exchange_pool,
+            client.clone(),
+            exchange_outbound,
+        )
+        .into_rpc(),
+    )?;
 
     io.merge(SunLeadRpc::<C>::new(client.clone()).into_rpc())?;
 

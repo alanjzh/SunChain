@@ -1,0 +1,25 @@
+[package]
+name = "sff-verifier"
+version = "0.1.0"
+license = "MIT-0"
+edition = "2021"
+description = "Sunchain Fast Finality (SFF): no_std certificate threshold verification, two-phase lock state machine and equivocation detection."
+publish = false
+
+[dependencies]
+sff-primitives = { path = "../sff-primitives", default-features = false }
+codec = { features = ["derive"], workspace = true }
+sp-core = { default-features = false, workspace = true }
+sp-crypto-hashing = { default-features = false, workspace = true }
+
+[dev-dependencies]
+sp-core = { default-features = true, workspace = true }
+
+[features]
+default = ["std"]
+std = [
+	"sff-primitives/std",
+	"codec/std",
+	"sp-core/std",
+	"sp-crypto-hashing/std",
+]

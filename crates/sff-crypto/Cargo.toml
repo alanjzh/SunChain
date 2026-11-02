@@ -1,0 +1,37 @@
+[package]
+name = "sff-crypto"
+version = "0.1.0"
+license = "MIT-0"
+edition = "2021"
+description = "Sunchain Fast Finality (SFF): BLS12-381 (min-sig) wrapper, proof-of-possession, aggregation and batch verification."
+publish = false
+
+[dependencies]
+sff-primitives = { path = "../sff-primitives", default-features = false }
+sff-verifier = { path = "../sff-verifier", default-features = false }
+codec = { features = ["derive"], workspace = true }
+sp-core = { workspace = true }
+sp-crypto-hashing = { default-features = false, workspace = true }
+
+ark-bls12-381 = { workspace = true }
+ark-ec = { default-features = false, workspace = true }
+ark-ff = { default-features = false, workspace = true }
+ark-std = { default-features = false, workspace = true }
+ark-serialize = { version = "0.4.2", default-features = false }
+
+[dev-dependencies]
+ark-std = { default-features = true, workspace = true }
+
+[features]
+default = ["std"]
+std = [
+	"sff-primitives/std",
+	"sff-verifier/std",
+	"codec/std",
+	"sp-core/std",
+	"sp-crypto-hashing/std",
+	"ark-ec/std",
+	"ark-ff/std",
+	"ark-std/std",
+	"ark-serialize/std",
+]

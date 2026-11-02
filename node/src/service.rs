@@ -1,14 +1,21 @@
 //! Service and ServiceFactory implementation. Specialized wrapper over substrate service.
 
-use sunchain_runtime::configs::TransactionConverter;
+use crate::cli::BackendType;
+use crate::cli::Cli;
+use crate::cli::EthConfiguration;
+use crate::eth::db_config_dir;
+use crate::eth::new_frontier_partial;
+use crate::eth::spawn_frontier_tasks;
+use crate::eth::FrontierBackend;
+use crate::eth::FrontierPartialComponents;
+use crate::oracle_feed::{FeedConfig, FeedMarket};
+use crate::pricefeed::{ConversionDetails, Exchange};
 use fc_consensus::FrontierBlockImport;
 use fc_rpc::pending;
 use fc_rpc::EthConfig;
 use futures::prelude::*;
 use futures::FutureExt;
 use sc_client_api::{Backend, BlockBackend};
-use crate::oracle_feed::{FeedConfig, FeedMarket};
-use crate::pricefeed::{ConversionDetails, Exchange};
 use sc_consensus_aura::{ImportQueueParams, SlotProportion, StartAuraParams};
 use sc_consensus_babe::{self, SlotProportion as BabeSlotProportion};
 use sc_consensus_grandpa::SharedVoterState;
@@ -21,31 +28,24 @@ use sc_service::{error::Error as ServiceError, Configuration, RpcHandlers, TaskM
 use sc_telemetry::{Telemetry, TelemetryWorker};
 use sc_transaction_pool::TransactionPoolHandle;
 use sc_transaction_pool_api::OffchainTransactionPoolFactory;
-use sp_tracing::tracing_subscriber::filter;
 use sp_core::U256;
-use crate::cli::BackendType;
-use crate::cli::Cli;
-use crate::cli::EthConfiguration;
-use crate::eth::db_config_dir;
-use crate::eth::new_frontier_partial;
-use crate::eth::spawn_frontier_tasks;
-use crate::eth::FrontierBackend;
-use crate::eth::FrontierPartialComponents;
+use sp_tracing::tracing_subscriber::filter;
+use sunchain_runtime::configs::TransactionConverter;
 // use polkadot_sdk::{
 //     sc_consensus_beefy as beefy, sc_consensus_beefy::BeefyRPCLinks,
 //     sc_consensus_grandpa as grandpa, sp_consensus_beefy as beefy_primitives, *,
 // };
 use crate::rpc as node_rpc;
-use sunchain_runtime::{self, apis::RuntimeApi, opaque::Block};
-use sc_consensus_babe::{BabeWorkerHandle};
+use babe_consensus_data_provider::BabeConsensusDataProvider;
+use frame_benchmarking_cli::SUBSTRATE_REFERENCE_HARDWARE;
+use sc_consensus_babe::BabeWorkerHandle;
 use sp_tracing::info;
 use std::f32::consts::E;
 use std::{sync::Arc, time::Duration};
-use babe_consensus_data_provider::BabeConsensusDataProvider;
-use frame_benchmarking_cli::SUBSTRATE_REFERENCE_HARDWARE;
+use sunchain_runtime::{self, apis::RuntimeApi, opaque::Block};
 
 use crate::sunlead_consensus::{
-	start_sunlead, sunlead_import_queue, SunLeadBlockImport, SunLeadParams,
+    start_sunlead, sunlead_import_queue, SunLeadBlockImport, SunLeadParams,
 };
 use sp_api::ProvideRuntimeApi;
 use sp_core::crypto::KeyTypeId;
@@ -65,12 +65,28 @@ use sunlead_primitives::SUNLEAD_ENGINE_ID;
 /// is always ready to author and finalize, regardless of how the dev seed was (or
 /// wasn't) plumbed through `Configuration`.
 fn inject_dev_session_keys(keystore: &sp_keystore::KeystorePtr, seed: &str) {
-	let _ = keystore.sr25519_generate_new(KeyTypeId(*b"babe"), Some(seed));
-	let _ = keystore.ed25519_generate_new(KeyTypeId(*b"gran"), Some(seed));
-	let _ = keystore.sr25519_generate_new(KeyTypeId(*b"imon"), Some(seed));
-	let _ = keystore.sr25519_generate_new(KeyTypeId(*b"audi"), Some(seed));
-	let _ = keystore.sr25519_generate_new(sunlead_primitives::KEY_TYPE, Some(seed));
-	log::info!(target: "sunchain", "injected dev session keys (seed {}) into keystore", seed);
+    let _ = keystore.sr25519_generate_new(KeyTypeId(*b"babe"), Some(seed));
+    let _ = keystore.ed25519_generate_new(KeyTypeId(*b"gran"), Some(seed));
+    let _ = keystore.sr25519_generate_new(KeyTypeId(*b"imon"), Some(seed));
+    let _ = keystore.sr25519_generate_new(KeyTypeId(*b"audi"), Some(seed));
+    let _ = keystore.sr25519_generate_new(sunlead_primitives::KEY_TYPE, Some(seed));
+    // SFF shadow (F2): the `sffb` BLS session key. `sff_generate_new` derives it
+    // as `BlsKeypair::from_seed(blake2_256(seed))` (no keystore password), which
+    // `chain_spec::dev_sffb_for` mirrors exactly — so the secret held here is the
+    // one advertised in the dev genesis session keys.
+    match keystore.sff_generate_new(sp_core::crypto::KeyTypeId(*b"sffb"), Some(seed.as_bytes())) {
+        Ok(public) => log::info!(
+            target: "sff",
+            "injected dev sffb session key (seed {}) pubkey 0x{}",
+            seed,
+            public.iter().map(|b| format!("{b:02x}")).collect::<String>()
+        ),
+        Err(error) => log::warn!(
+            target: "sff",
+            "could not inject dev sffb session key: {error:?}"
+        ),
+    }
+    log::info!(target: "sunchain", "injected dev session keys (seed {}) into keystore", seed);
 }
 
 use fc_storage::StorageOverrideHandler;
@@ -83,7 +99,8 @@ use std::path::Path;
 pub type HostFunctions = (
     sp_io::SubstrateHostFunctions,
     sp_statement_store::runtime_api::HostFunctions,
-	cumulus_primitives_proof_size_hostfunction::storage_proof_size::HostFunctions,
+    cumulus_primitives_proof_size_hostfunction::storage_proof_size::HostFunctions,
+    sunchain_runtime::sff_keystore::sff_keystore::HostFunctions,
 );
 
 /// Host functions required for kitchensink runtime and Substrate node.
@@ -92,17 +109,15 @@ pub type HostFunctions = (
     sp_io::SubstrateHostFunctions,
     sp_statement_store::runtime_api::HostFunctions,
     cumulus_primitives_proof_size_hostfunction::storage_proof_size::HostFunctions,
+    sunchain_runtime::sff_keystore::sff_keystore::HostFunctions,
 );
 /// Upper bound on actions packed into one exchange batch; must not exceed the runtime's
 /// `MaxActionsPerBatch`, which the extrinsic re-checks anyway. Defined in the proposer, which
 /// is the only other user.
 pub(crate) use crate::exchange_proposer::MAX_EXCHANGE_BATCH_ACTIONS;
 
-pub(crate) type FullClient = sc_service::TFullClient<
-    Block,
-    RuntimeApi,
-    sc_executor::WasmExecutor<HostFunctions>,
->;
+pub(crate) type FullClient =
+    sc_service::TFullClient<Block, RuntimeApi, sc_executor::WasmExecutor<HostFunctions>>;
 type FullBackend = sc_service::TFullBackend<Block>;
 type FullSelectChain = sc_consensus::LongestChain<FullBackend, Block>;
 type FullGrandpaBlockImport =
@@ -138,20 +153,10 @@ const GRANDPA_JUSTIFICATION_PERIOD: u32 = 512;
 // 	),
 // >;
 
-
-
-type FullGrandpa = sc_consensus_grandpa::GrandpaBlockImport<
-	FullBackend,
-	Block,
-	FullClient,
-	FullSelectChain,
->;
-type FullBabe = sc_consensus_babe::BabeBlockImport<
-	Block,
-	FullClient,
-	FullGrandpa,
->;
-type FullFrontier = FrontierBlockImport<Block, FullBabe,FullClient>;
+type FullGrandpa =
+    sc_consensus_grandpa::GrandpaBlockImport<FullBackend, Block, FullClient, FullSelectChain>;
+type FullBabe = sc_consensus_babe::BabeBlockImport<Block, FullClient, FullGrandpa>;
+type FullFrontier = FrontierBlockImport<Block, FullBabe, FullClient>;
 type EffectiveFullBlockImport = FullFrontier;
 
 // The effective block import used by SunLead: it applies the SunLead pre-digest
@@ -170,22 +175,21 @@ pub fn new_partial<NB>(
         sc_consensus::DefaultImportQueue<Block>,
         sc_transaction_pool::TransactionPoolHandle<Block, FullClient>,
         (
-
             // sc_consensus_grandpa::GrandpaBlockImport<FullBackend, Block, FullClient, FullSelectChain>,
             // sc_consensus_grandpa::LinkHalf<Block, FullClient, FullSelectChain>,
             (
-				Option<
-					sc_consensus_babe::BabeBlockImport<
-						Block,
-						FullClient,
-						FrontierBlockImport<Block, FullGrandpaBlockImport, FullClient>,
-					>,
-				>,
+                Option<
+                    sc_consensus_babe::BabeBlockImport<
+                        Block,
+                        FullClient,
+                        FrontierBlockImport<Block, FullGrandpaBlockImport, FullClient>,
+                    >,
+                >,
                 sc_consensus_grandpa::LinkHalf<Block, FullClient, FullSelectChain>,
                 Option<sc_consensus_babe::BabeLink<Block>>,
             ),
             Option<Telemetry>,
-			Option<BabeWorkerHandle<Block>>,
+            Option<BabeWorkerHandle<Block>>,
             bool,
             FullSunLeadBlockImport,
         ),
@@ -207,9 +211,7 @@ where
         })
         .transpose()?;
 
-    let executor = sc_service::new_wasm_executor::<HostFunctions>(
-        &config.executor,
-    );
+    let executor = sc_service::new_wasm_executor::<HostFunctions>(&config.executor);
     let (client, backend, keystore_container, task_manager) = sc_service::new_full_parts(
         config,
         telemetry.as_ref().map(|(_, telemetry)| telemetry.handle()),
@@ -225,14 +227,11 @@ where
     // without `--alice`/`--bob`/`--dev`) and inject only the local node's seed to
     // avoid cross-node equivocation.
     {
-        let dev_seed = config
-            .dev_key_seed
-            .clone()
-            .or_else(|| {
-                use sc_chain_spec::ChainSpec as _;
-                (config.chain_spec.chain_type() == sc_chain_spec::ChainType::Development)
-                    .then(|| "//Alice".to_string())
-            });
+        let dev_seed = config.dev_key_seed.clone().or_else(|| {
+            use sc_chain_spec::ChainSpec as _;
+            (config.chain_spec.chain_type() == sc_chain_spec::ChainType::Development)
+                .then(|| "//Alice".to_string())
+        });
         if let Some(seed) = dev_seed {
             inject_dev_session_keys(&keystore_container.keystore(), &seed);
         }
@@ -247,8 +246,7 @@ where
 
     let select_chain = sc_consensus::LongestChain::new(backend.clone());
 
-	// move this to a separate function
-
+    // move this to a separate function
 
     let transaction_pool = Arc::from(
         sc_transaction_pool::Builder::new(
@@ -269,23 +267,19 @@ where
         telemetry.as_ref().map(|x| x.handle()),
     )?;
 
+    let frontier_block_import =
+        FrontierBlockImport::new(grandpa_block_import.clone(), client.clone());
 
-	
-	let frontier_block_import = FrontierBlockImport::new(
-        grandpa_block_import.clone(),
-        client.clone(),
-    );
+    // BABE's `block_import` eagerly finalizes the current finalized head on
+    // construction, which panics when that head is a SunLead block (it carries no
+    // BABE pre-digest). We therefore only build it when BABE is actually the
+    // active authoring consensus; SunLead chains never construct it. The slot
+    // duration is read from the runtime config (no construction) and is needed by
+    // both consensus paths for the timestamp<->slot mapping.
+    let babe_config = sc_consensus_babe::configuration(&*client)?;
+    let slot_duration = babe_config.slot_duration();
 
-	// BABE's `block_import` eagerly finalizes the current finalized head on
-	// construction, which panics when that head is a SunLead block (it carries no
-	// BABE pre-digest). We therefore only build it when BABE is actually the
-	// active authoring consensus; SunLead chains never construct it. The slot
-	// duration is read from the runtime config (no construction) and is needed by
-	// both consensus paths for the timestamp<->slot mapping.
-	let babe_config = sc_consensus_babe::configuration(&*client)?;
-	let slot_duration = babe_config.slot_duration();
-
-	let justification_import = grandpa_block_import.clone();
+    let justification_import = grandpa_block_import.clone();
 
     // let cidp_client = client.clone();
     // let import_queue =
@@ -337,7 +331,10 @@ where
     // resort we fall back to inspecting the finalized head's digest for the SunLead
     // engine id so a validator reboot can never be misclassified as BABE.
     let finalized_hash = client.chain_info().finalized_hash;
-    let use_sunlead = match sunchain_runtime::apis::SunLeadApi::is_active(&*sunlead_api, finalized_hash) {
+    let use_sunlead = match sunchain_runtime::apis::SunLeadApi::is_active(
+        &*sunlead_api,
+        finalized_hash,
+    ) {
         Ok(active) => active,
         Err(e) => {
             log::warn!(
@@ -367,14 +364,14 @@ where
     // would then bring the chain down). `slot_duration` above already came from the
     // runtime config, so SunLead's timestamp<->slot mapping is unaffected.
     let (babe_block_import, babe_link) = if use_sunlead {
-    	(None, None)
+        (None, None)
     } else {
-    	let (bi, bl) = sc_consensus_babe::block_import(
-    		babe_config,
-    		frontier_block_import.clone(),
-    		client.clone(),
-    	)?;
-    	(Some(bi), Some(bl))
+        let (bi, bl) = sc_consensus_babe::block_import(
+            babe_config,
+            frontier_block_import.clone(),
+            client.clone(),
+        )?;
+        (Some(bi), Some(bl))
     };
 
     let (import_queue, babe_worker_handle): (
@@ -437,8 +434,6 @@ where
     // 	fee_history_cache_limit,
     // } = new_frontier_partial(&eth_config)?;
 
-
-
     // let warp_sync = Arc::new(sc_consensus_grandpa::warp_proof::NetworkProvider::new(
     //     backend.clone(),
     //     grandpa_link.shared_authority_set().clone(),
@@ -459,8 +454,7 @@ where
     //         metrics,
     //     })?;
 
-
-     let import_setup = (babe_block_import, grandpa_link, babe_link);
+    let import_setup = (babe_block_import, grandpa_link, babe_link);
 
     Ok(sc_service::PartialComponents {
         client,
@@ -470,7 +464,13 @@ where
         keystore_container,
         select_chain,
         transaction_pool,
-        other: (import_setup, telemetry, babe_worker_handle, use_sunlead, sunlead_block_import),
+        other: (
+            import_setup,
+            telemetry,
+            babe_worker_handle,
+            use_sunlead,
+            sunlead_block_import,
+        ),
     })
 }
 
@@ -493,7 +493,7 @@ pub struct NewFullBase {
 /// Creates a full service from the configuration.
 pub async fn new_full_base<N: NetworkBackend<Block, <Block as sp_runtime::traits::Block>::Hash>>(
     config: Configuration,
-	eth_config: EthConfiguration,
+    eth_config: EthConfiguration,
     with_startup_data: impl FnOnce(
         &Option<
             sc_consensus_babe::BabeBlockImport<
@@ -506,14 +506,19 @@ pub async fn new_full_base<N: NetworkBackend<Block, <Block as sp_runtime::traits
     ),
 ) -> Result<NewFullBase, ServiceError> {
     let exchange_pool_path = config.base_path.path().join("exchange_pool.bin");
-    let exchange_pool = Arc::new(std::sync::Mutex::new(crate::exchange_pool::ExchangePool::new(
-        MAX_EXCHANGE_BATCH_ACTIONS,
-        Some(exchange_pool_path),
-    )));
+    let exchange_pool = Arc::new(std::sync::Mutex::new(
+        crate::exchange_pool::ExchangePool::new(
+            MAX_EXCHANGE_BATCH_ACTIONS,
+            Some(exchange_pool_path),
+        ),
+    ));
     let (exchange_outbound, exchange_inbound) = futures::channel::mpsc::unbounded();
     // The RPC closure below is `move`, so it needs its own handle to the same pool.
     let exchange_pool_rpc = exchange_pool.clone();
-
+    // Capture the dev/session seed before `config` is moved into `build_network`.
+    // SFF (F2) uses it to derive the dev node's shadow BLS key; a real (non-dev)
+    // deployment leaves it `None` and signs through the keystore instead.
+    let sff_dev_key_seed = config.dev_key_seed.clone();
 
     let is_offchain_indexing_enabled = config.offchain_worker.indexing_enabled;
     let role = config.role;
@@ -536,12 +541,11 @@ pub async fn new_full_base<N: NetworkBackend<Block, <Block as sp_runtime::traits
         other: (import_setup, mut telemetry, babe_worker_handle, use_sunlead, sunlead_block_import),
     } = new_partial::<N>(&config, &eth_config)?;
 
-	
     let metrics = N::register_notification_metrics(
         config.prometheus_config.as_ref().map(|cfg| &cfg.registry),
     );
-    
-	let auth_disc_publish_non_global_ips = config.network.allow_non_globals_in_dht;
+
+    let auth_disc_publish_non_global_ips = config.network.allow_non_globals_in_dht;
     let auth_disc_public_addresses = config.network.public_addresses.clone();
 
     let mut net_config = sc_network::config::FullNetworkConfiguration::<_, _, N>::new(
@@ -580,6 +584,16 @@ pub async fn new_full_base<N: NetworkBackend<Block, <Block as sp_runtime::traits
         );
     net_config.add_notification_protocol(exchange_protocol_config);
 
+    // SFF F2 shadow: a dedicated set for gossiping SFF votes / certificates.
+    let sff_protocol_name: sc_network::ProtocolName = crate::fast_finality_p2p::SFF_PROTOCOL.into();
+    let (sff_protocol_config, sff_notification_service) =
+        crate::fast_finality_p2p::sff_peers_set_config::<_, N>(
+            sff_protocol_name,
+            metrics.clone(),
+            Arc::clone(&peer_store_handle),
+        );
+    net_config.add_notification_protocol(sff_protocol_config);
+
     let warp_sync = Arc::new(sc_consensus_grandpa::warp_proof::NetworkProvider::new(
         backend.clone(),
         import_setup.1.shared_authority_set().clone(),
@@ -600,25 +614,24 @@ pub async fn new_full_base<N: NetworkBackend<Block, <Block as sp_runtime::traits
             metrics,
         })?;
 
-
     let net_config_path = config.network.net_config_path.clone();
 
-	let storage_override =
-       Arc::new(StorageOverrideHandler::<Block, FullClient, FullBackend>::new(client.clone()));
+    let storage_override =
+        Arc::new(StorageOverrideHandler::<Block, FullClient, FullBackend>::new(client.clone()));
 
-	let FrontierPartialComponents {
-		filter_pool,
-		fee_history_cache,
-		fee_history_cache_limit,
-	} = new_frontier_partial(&eth_config)?;
+    let FrontierPartialComponents {
+        filter_pool,
+        fee_history_cache,
+        fee_history_cache_limit,
+    } = new_frontier_partial(&eth_config)?;
 
-	let filter_pool1 = filter_pool.clone();
-	let fee_history_cache1 = fee_history_cache.clone();
+    let filter_pool1 = filter_pool.clone();
+    let fee_history_cache1 = fee_history_cache.clone();
 
-	let eth_backend = backend.clone();
-	let eth_storage_override = storage_override.clone();
+    let eth_backend = backend.clone();
+    let eth_storage_override = storage_override.clone();
 
-    let (rpc_extensions_builder, rpc_setup,frontier_backend,pubsub_notification_sinks) = {
+    let (rpc_extensions_builder, rpc_setup, frontier_backend, pubsub_notification_sinks) = {
         let (_, grandpa_link, _) = &import_setup;
 
         let justification_stream = grandpa_link.justification_stream();
@@ -637,66 +650,66 @@ pub async fn new_full_base<N: NetworkBackend<Block, <Block as sp_runtime::traits
         let keystore = keystore_container.keystore();
         let chain_spec = config.chain_spec.cloned_box();
 
-    // let maybe_registry = config.prometheus_config.as_ref().map(|cfg| &cfg.registry);
-    // let metrics = N::register_notification_metrics(maybe_registry);
-    // let mut net_config = sc_network::config::FullNetworkConfiguration::<_, _, N>::new(
-    //     &config.network,
-    //     maybe_registry.cloned(),
-    // );
-  let frontier_backend = match eth_config.frontier_backend_type {
-        BackendType::KeyValue => FrontierBackend::KeyValue(Arc::new(fc_db::kv::Backend::open(
-            Arc::clone(&client),
-            &config.database,
-            &db_config_dir(&config),
-        )?)),
-        BackendType::Sql => {
-            let db_path = db_config_dir(&config).join("sql");
-            std::fs::create_dir_all(&db_path).expect("failed creating sql db directory");
-            let backend = futures::executor::block_on(fc_db::sql::Backend::new(
-                fc_db::sql::BackendConfig::Sqlite(fc_db::sql::SqliteBackendConfig {
-                    path: Path::new("sqlite:///")
-                        .join(db_path)
-                        .join("frontier.db3")
-                        .to_str()
-                        .unwrap(),
-                    create_if_missing: true,
-                    thread_count: eth_config.frontier_sql_backend_thread_count,
-                    cache_size: eth_config.frontier_sql_backend_cache_size,
-                }),
-                eth_config.frontier_sql_backend_pool_size,
-                std::num::NonZeroU32::new(eth_config.frontier_sql_backend_num_ops_timeout),
-                storage_override.clone(),
-            ))
-            .unwrap_or_else(|err| panic!("failed creating sql backend: {:?}", err));
-            FrontierBackend::Sql(Arc::new(backend))
-        }
-    };
+        // let maybe_registry = config.prometheus_config.as_ref().map(|cfg| &cfg.registry);
+        // let metrics = N::register_notification_metrics(maybe_registry);
+        // let mut net_config = sc_network::config::FullNetworkConfiguration::<_, _, N>::new(
+        //     &config.network,
+        //     maybe_registry.cloned(),
+        // );
+        let frontier_backend = match eth_config.frontier_backend_type {
+            BackendType::KeyValue => FrontierBackend::KeyValue(Arc::new(fc_db::kv::Backend::open(
+                Arc::clone(&client),
+                &config.database,
+                &db_config_dir(&config),
+            )?)),
+            BackendType::Sql => {
+                let db_path = db_config_dir(&config).join("sql");
+                std::fs::create_dir_all(&db_path).expect("failed creating sql db directory");
+                let backend = futures::executor::block_on(fc_db::sql::Backend::new(
+                    fc_db::sql::BackendConfig::Sqlite(fc_db::sql::SqliteBackendConfig {
+                        path: Path::new("sqlite:///")
+                            .join(db_path)
+                            .join("frontier.db3")
+                            .to_str()
+                            .unwrap(),
+                        create_if_missing: true,
+                        thread_count: eth_config.frontier_sql_backend_thread_count,
+                        cache_size: eth_config.frontier_sql_backend_cache_size,
+                    }),
+                    eth_config.frontier_sql_backend_pool_size,
+                    std::num::NonZeroU32::new(eth_config.frontier_sql_backend_num_ops_timeout),
+                    storage_override.clone(),
+                ))
+                .unwrap_or_else(|err| panic!("failed creating sql backend: {:?}", err));
+                FrontierBackend::Sql(Arc::new(backend))
+            }
+        };
 
-	let frontier_backend = Arc::new(frontier_backend);
-	let frontier_backend1 = frontier_backend.clone();
+        let frontier_backend = Arc::new(frontier_backend);
+        let frontier_backend1 = frontier_backend.clone();
 
-	let prometheus_registry = config.prometheus_registry().cloned();
+        let prometheus_registry = config.prometheus_registry().cloned();
 
-    let block_data_cache = Arc::new(fc_rpc::EthBlockDataCacheTask::new(
-        task_manager.spawn_handle(),
-        storage_override.clone(),
-        eth_config.eth_log_block_cache,
-        eth_config.eth_statuses_cache,
-        prometheus_registry.clone(),
-    ));
+        let block_data_cache = Arc::new(fc_rpc::EthBlockDataCacheTask::new(
+            task_manager.spawn_handle(),
+            storage_override.clone(),
+            eth_config.eth_log_block_cache,
+            eth_config.eth_statuses_cache,
+            prometheus_registry.clone(),
+        ));
 
-	let pubsub_notification_sinks: fc_mapping_sync::EthereumBlockNotificationSinks<
-		fc_mapping_sync::EthereumBlockNotification<Block>,
-	> = Default::default();
-	let pubsub_notification_sinks1 = Arc::new(pubsub_notification_sinks);
-	let pubsub_notification_sinks2 = pubsub_notification_sinks1.clone();
-    let rpc_backend = backend.clone();
+        let pubsub_notification_sinks: fc_mapping_sync::EthereumBlockNotificationSinks<
+            fc_mapping_sync::EthereumBlockNotification<Block>,
+        > = Default::default();
+        let pubsub_notification_sinks1 = Arc::new(pubsub_notification_sinks);
+        let pubsub_notification_sinks2 = pubsub_notification_sinks1.clone();
+        let rpc_backend = backend.clone();
 
-	// `import_setup.2` (`babe_link`) is `None` on a SunLead chain, so derive the
-	// slot duration from the runtime config instead of the BABE link.
-	let slot_duration = sc_consensus_babe::configuration(&*client)?.slot_duration();
-	let target_gas_price = eth_config.target_gas_price;
-    let pending_create_inherent_data_providers = move |_, ()| async move {
+        // `import_setup.2` (`babe_link`) is `None` on a SunLead chain, so derive the
+        // slot duration from the runtime config instead of the BABE link.
+        let slot_duration = sc_consensus_babe::configuration(&*client)?.slot_duration();
+        let target_gas_price = eth_config.target_gas_price;
+        let pending_create_inherent_data_providers = move |_, ()| async move {
             let current = sp_timestamp::InherentDataProvider::from_system_time();
             let next_slot = current.timestamp().as_millis() + slot_duration.as_millis();
 
@@ -710,14 +723,14 @@ pub async fn new_full_base<N: NetworkBackend<Block, <Block as sp_runtime::traits
             Ok((slot, timestamp, dynamic_fee))
         };
 
-		let network = network.clone();
+        let network = network.clone();
         let is_authority = config.role.clone().is_authority().clone();
         let enable_dev_signer = eth_config.enable_dev_signer;
-		let sync_service0 = sync_service.clone();
-    	let rpc_extensions_builder =
-            move | subscription_executor: node_rpc::SubscriptionTaskExecutor| {
-				let max_past_logs = eth_config.max_past_logs;
-				let execute_gas_limit_multiplier = eth_config.execute_gas_limit_multiplier;
+        let sync_service0 = sync_service.clone();
+        let rpc_extensions_builder =
+            move |subscription_executor: node_rpc::SubscriptionTaskExecutor| {
+                let max_past_logs = eth_config.max_past_logs;
+                let execute_gas_limit_multiplier = eth_config.execute_gas_limit_multiplier;
                 let eth_deps = node_rpc::EthDeps {
                     client: client.clone(),
                     pool: pool.clone(),
@@ -747,8 +760,8 @@ pub async fn new_full_base<N: NetworkBackend<Block, <Block as sp_runtime::traits
                     pool: pool.clone(),
                     select_chain: select_chain.clone(),
                     chain_spec: chain_spec.cloned_box(),
-				
-					// beefy: node_rpc::BeefyDeps::<beefy_primitives::ecdsa_crypto::AuthorityId> {
+
+                    // beefy: node_rpc::BeefyDeps::<beefy_primitives::ecdsa_crypto::AuthorityId> {
                     //     beefy_finality_proof_stream: beefy_rpc_links
                     //         .from_voter_justif_stream
                     //         .clone(),
@@ -770,16 +783,16 @@ pub async fn new_full_base<N: NetworkBackend<Block, <Block as sp_runtime::traits
                     },
 
                     backend: rpc_backend.clone(),
-					//statement_store: rpc_statement_store.clone(),
+                    //statement_store: rpc_statement_store.clone(),
                     eth: eth_deps,
-        exchange_pool: exchange_pool_rpc.clone(),
-        exchange_outbound: exchange_outbound.clone(),
+                    exchange_pool: exchange_pool_rpc.clone(),
+                    exchange_outbound: exchange_outbound.clone(),
                 };
 
                 // node_rpc::create_full(deps).map_err(Into::into)
                 //node_rpc::create_full(deps).map_err(|e| sc_service::Error::from(e))
 
-				let pending_consenus_data_provider = Box::new(BabeConsensusDataProvider::new(
+                let pending_consenus_data_provider = Box::new(BabeConsensusDataProvider::new(
                     client.clone(),
                     keystore.clone(),
                 ));
@@ -793,13 +806,17 @@ pub async fn new_full_base<N: NetworkBackend<Block, <Block as sp_runtime::traits
                 .map_err(Into::into)
             };
 
-        (rpc_extensions_builder, shared_voter_state2,frontier_backend1,pubsub_notification_sinks2)
+        (
+            rpc_extensions_builder,
+            shared_voter_state2,
+            frontier_backend1,
+            pubsub_notification_sinks2,
+        )
     };
 
-		let shared_voter_state = rpc_setup;
+    let shared_voter_state = rpc_setup;
 
-		let network1 = network.clone();
-
+    let network1 = network.clone();
 
     let rpc_handlers = sc_service::spawn_tasks(sc_service::SpawnTasksParams {
         config,
@@ -816,7 +833,7 @@ pub async fn new_full_base<N: NetworkBackend<Block, <Block as sp_runtime::traits
         telemetry: telemetry.as_mut(),
     })?;
 
-	spawn_frontier_tasks(
+    spawn_frontier_tasks(
         &task_manager,
         client.clone(),
         eth_backend.clone(),
@@ -827,7 +844,8 @@ pub async fn new_full_base<N: NetworkBackend<Block, <Block as sp_runtime::traits
         fee_history_cache_limit,
         sync_service.clone(),
         pubsub_notification_sinks,
-    ).await;
+    )
+    .await;
 
     let (block_import, grandpa_link, babe_link) = import_setup;
 
@@ -844,50 +862,55 @@ pub async fn new_full_base<N: NetworkBackend<Block, <Block as sp_runtime::traits
         let client = client.clone();
         let mut notifications =
             sc_client_api::BlockchainEvents::import_notification_stream(client.as_ref());
-        task_manager.spawn_handle().spawn("exchange-pool-prune", None, async move {
-            use futures::StreamExt;
-            log::info!(target: "exchange", "prune task started");
+        task_manager
+            .spawn_handle()
+            .spawn("exchange-pool-prune", None, async move {
+                use futures::StreamExt;
+                log::info!(target: "exchange", "prune task started");
 
-            while let Some(notification) = notifications.next().await {
-                let at = notification.hash;
-                let actions: Vec<_> = match pool.lock() {
-                    Ok(guard) => guard.pending().into_iter().map(|(_, a)| a).collect(),
-                    Err(_) => break,
-                };
-                log::info!(target: "exchange", "prune tick: {} queued", actions.len());
-                if actions.is_empty() {
-                    continue;
-                }
+                while let Some(notification) = notifications.next().await {
+                    let at = notification.hash;
+                    let actions: Vec<_> = match pool.lock() {
+                        Ok(guard) => guard.pending().into_iter().map(|(_, a)| a).collect(),
+                        Err(_) => break,
+                    };
+                    log::info!(target: "exchange", "prune tick: {} queued", actions.len());
+                    if actions.is_empty() {
+                        continue;
+                    }
 
-                let api = sp_api::ProvideRuntimeApi::runtime_api(client.as_ref());
-                let mut still_valid = std::collections::HashSet::new();
-                for action in &actions {
-                    let ok = sunchain_runtime::apis::ExchangeRuntimeApi::validate_exchange_action(
-                        &*api,
-                        at,
-                        action.clone(),
-                    )
-                    .map(|r| r.is_ok())
-                    .unwrap_or(false);
-                    if ok {
-                        still_valid.insert(scale_codec::Encode::encode(action));
+                    let api = sp_api::ProvideRuntimeApi::runtime_api(client.as_ref());
+                    let mut still_valid = std::collections::HashSet::new();
+                    for action in &actions {
+                        let ok =
+                            sunchain_runtime::apis::ExchangeRuntimeApi::validate_exchange_action(
+                                &*api,
+                                at,
+                                action.clone(),
+                            )
+                            .map(|r| r.is_ok())
+                            .unwrap_or(false);
+                        if ok {
+                            still_valid.insert(scale_codec::Encode::encode(action));
+                        }
+                    }
+
+                    if let Ok(mut guard) = pool.lock() {
+                        let before = guard.len();
+                        guard.retain_valid(|a| {
+                            still_valid.contains(&scale_codec::Encode::encode(a))
+                        });
+                        let dropped = before.saturating_sub(guard.len());
+                        if dropped > 0 {
+                            log::info!(target: "exchange", "dropped {dropped} executed action(s)");
+                        }
+                        // Persist after each prune so a restart reloads the surviving queue (S2-6).
+                        if let Err(e) = guard.save() {
+                            log::warn!(target: "exchange", "could not persist pool: {e}");
+                        }
                     }
                 }
-
-                if let Ok(mut guard) = pool.lock() {
-                	let before = guard.len();
-                	guard.retain_valid(|a| still_valid.contains(&scale_codec::Encode::encode(a)));
-                	let dropped = before.saturating_sub(guard.len());
-                	if dropped > 0 {
-                		log::info!(target: "exchange", "dropped {dropped} executed action(s)");
-                	}
-                	// Persist after each prune so a restart reloads the surviving queue (S2-6).
-                	if let Err(e) = guard.save() {
-                		log::warn!(target: "exchange", "could not persist pool: {e}");
-                	}
-                }
-            }
-        });
+            });
     }
 
     // P2-D: premium votes. One vote per block per market, so a sample epoch collects many
@@ -901,7 +924,9 @@ pub async fn new_full_base<N: NetworkBackend<Block, <Block as sp_runtime::traits
             crate::premium_feed::run::<Block, _, _, _>(
                 client,
                 pool,
-                crate::premium_feed::PremiumConfig { markets: vec![0, 1, 2, 3] },
+                crate::premium_feed::PremiumConfig {
+                    markets: vec![0, 1, 2, 3],
+                },
             ),
         );
     }
@@ -919,13 +944,39 @@ pub async fn new_full_base<N: NetworkBackend<Block, <Block as sp_runtime::traits
         // pair is `XDGUSDT`; Bitfinex writes USDT pairs `tBTCUST` and `tDOGE:UST`. All four
         // are USDT-quoted, so no venue needs converting.
         let oracle_markets: Vec<(u32, String, String, String, String)> = vec![
-            (0, "BTCUSDT".to_string(), "BTC-USDT".to_string(), "XBTUSDT".to_string(), "tBTCUST".to_string()),
-            (1, "ETHUSDT".to_string(), "ETH-USDT".to_string(), "ETHUSDT".to_string(), "tETHUST".to_string()),
-            (2, "SOLUSDT".to_string(), "SOL-USDT".to_string(), "SOLUSDT".to_string(), "tSOLUST".to_string()),
-            (3, "DOGEUSDT".to_string(), "DOGE-USDT".to_string(), "XDGUSDT".to_string(), "tDOGE:UST".to_string()),
+            (
+                0,
+                "BTCUSDT".to_string(),
+                "BTC-USDT".to_string(),
+                "XBTUSDT".to_string(),
+                "tBTCUST".to_string(),
+            ),
+            (
+                1,
+                "ETHUSDT".to_string(),
+                "ETH-USDT".to_string(),
+                "ETHUSDT".to_string(),
+                "tETHUST".to_string(),
+            ),
+            (
+                2,
+                "SOLUSDT".to_string(),
+                "SOL-USDT".to_string(),
+                "SOLUSDT".to_string(),
+                "tSOLUST".to_string(),
+            ),
+            (
+                3,
+                "DOGEUSDT".to_string(),
+                "DOGE-USDT".to_string(),
+                "XDGUSDT".to_string(),
+                "tDOGE:UST".to_string(),
+            ),
         ];
 
-        for (market_id, symbol_binance, symbol_okx, symbol_kraken, symbol_bitfinex) in oracle_markets {
+        for (market_id, symbol_binance, symbol_okx, symbol_kraken, symbol_bitfinex) in
+            oracle_markets
+        {
             markets.push(FeedMarket {
                 market_id,
                 // Every venue here quotes USDT, so none of them needs converting. A USD
@@ -979,9 +1030,98 @@ pub async fn new_full_base<N: NetworkBackend<Block, <Block as sp_runtime::traits
         let service = exchange_notification_service;
         let pool = exchange_pool.clone();
         let client = client.clone();
-        task_manager.spawn_handle().spawn("exchange-gossip", None, async move {
-            crate::exchange_p2p::run_exchange_gossip::<Block, _>(service, pool, client, exchange_inbound).await;
-        });
+        task_manager
+            .spawn_handle()
+            .spawn("exchange-gossip", None, async move {
+                crate::exchange_p2p::run_exchange_gossip::<Block, _>(
+                    service,
+                    pool,
+                    client,
+                    exchange_inbound,
+                )
+                .await;
+            });
+    }
+
+    // SFF F2 shadow engine. Runs as a non-essential task: a panic or stall here
+    // must never stop BABE authoring or GRANDPA finality. The engine only
+    // produces/observes SFF votes + certificates; it changes no chain state.
+    {
+        let (sff_outbound, sff_inbound) = futures::channel::mpsc::unbounded();
+        let sff_pool = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::fast_finality_pool::FastFinalityPool::new(),
+        ));
+        // DEV-ONLY: real proofs-of-possession for the dev validators' BLS keys.
+        // Derived from the same dev seeds used by the genesis session keys, so the
+        // keys and PoPs match. Empty on real deployments, where the PoP comes from
+        // the on-chain `register_bls_key`.
+        let sff_dev_pops: Vec<(
+            sff_primitives::BlsPublicKey,
+            sff_primitives::BlsSignature,
+        )> = match sff_dev_key_seed.as_deref() {
+            Some(_) => ["//Alice", "//Bob"]
+                .iter()
+                .filter_map(|dev_seed| {
+                    let seed = sp_core::hashing::blake2_256(dev_seed.as_bytes());
+                    let keypair = sff_crypto::BlsKeypair::from_seed(&seed);
+                    Some((keypair.public(), sff_crypto::pop_sign(&keypair)))
+                })
+                .collect(),
+            None => Default::default(),
+        };
+        let sff_provider = std::sync::Arc::new(crate::fast_finality::RuntimeAuthorityProvider::<
+            Block,
+            FullClient,
+        >::new(client.clone(), sff_dev_pops));
+
+        // Gossip: validate (BLS) + relay SFF messages.
+        {
+            let service = sff_notification_service;
+            let pool = sff_pool.clone();
+            let provider = sff_provider.clone();
+            let client = client.clone();
+            task_manager
+                .spawn_handle()
+                .spawn("sff-gossip", None, async move {
+                    crate::fast_finality_p2p::run_sff_gossip::<Block, _, _>(
+                        service,
+                        pool,
+                        provider,
+                        client,
+                        sff_inbound,
+                    )
+                    .await;
+                });
+        }
+
+        // Engine: vote on imported blocks, aggregate QCs, observe vs GRANDPA.
+        {
+            let pool = sff_pool.clone();
+            let provider = sff_provider.clone();
+            let client = client.clone();
+            let import_stream =
+                sc_client_api::BlockchainEvents::import_notification_stream(client.as_ref());
+            // Production signing path: the secret never leaves the keystore. On dev
+            // chains `inject_dev_session_keys` already put an `sffb` key in the
+            // keystore, so this is the same code path a real validator runs.
+            let signer = std::sync::Arc::new(crate::fast_finality::KeystoreSffSigner::new(
+                keystore_container.keystore(),
+            ));
+            task_manager
+                .spawn_handle()
+                .spawn("sff-engine", None, async move {
+                    crate::fast_finality::run_fast_finality::<Block, _, _, _>(
+                        provider,
+                        signer,
+                        pool,
+                        client,
+                        sff_outbound,
+                        genesis_hash,
+                        import_stream,
+                    )
+                    .await;
+                });
+        }
     }
 
     if let sc_service::config::Role::Authority { .. } = &role {
@@ -1015,16 +1155,14 @@ pub async fn new_full_base<N: NetworkBackend<Block, <Block as sp_runtime::traits
                 block_import: sunlead_block_import,
                 sync_oracle: sync_service.clone(),
                 justification_sync_link: sync_service.clone(),
-                create_inherent_data_providers: move |_, ()| {
-                    async move {
-                        let timestamp = sp_timestamp::InherentDataProvider::from_system_time();
-                        let slot =
+                create_inherent_data_providers: move |_, ()| async move {
+                    let timestamp = sp_timestamp::InherentDataProvider::from_system_time();
+                    let slot =
 							sp_consensus_babe::inherents::InherentDataProvider::from_timestamp_and_slot_duration(
 								*timestamp,
 								slot_duration,
 							);
-                        Ok((slot, timestamp))
-                    }
+                    Ok((slot, timestamp))
                 },
                 force_authoring,
                 backoff_authoring_blocks,
@@ -1186,14 +1324,18 @@ pub async fn new_full_base<N: NetworkBackend<Block, <Block as sp_runtime::traits
 }
 
 /// Builds a new service for a full client.
-pub async fn new_full(config: Configuration,eth_config: EthConfiguration, cli: Cli) -> Result<TaskManager, ServiceError> {
-    let res = new_full_base::<sc_network::NetworkWorker<_, _>>(config, eth_config,|_, _| ()).await;
-        // .map(|NewFullBase { task_manager, .. }| task_manager).await;
-		// if let Ok(v) = task_manager {
-        //    Ok(v.task_manager)
-		// } else {
-		// 	panic!("Error starting service")
-		// }
+pub async fn new_full(
+    config: Configuration,
+    eth_config: EthConfiguration,
+    cli: Cli,
+) -> Result<TaskManager, ServiceError> {
+    let res = new_full_base::<sc_network::NetworkWorker<_, _>>(config, eth_config, |_, _| ()).await;
+    // .map(|NewFullBase { task_manager, .. }| task_manager).await;
+    // if let Ok(v) = task_manager {
+    //    Ok(v.task_manager)
+    // } else {
+    // 	panic!("Error starting service")
+    // }
     match res {
         Ok(v) => Ok(v.task_manager),
         Err(e) => panic!("Error starting service: {:?}", e),

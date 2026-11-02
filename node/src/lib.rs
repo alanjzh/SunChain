@@ -17,6 +17,9 @@ pub mod oracle_feed;
 pub mod pricefeed;
 mod exchange_p2p;
 mod exchange_proposer;
+mod fast_finality_p2p;
+mod fast_finality_pool;
+mod fast_finality;
 
 pub fn initialize(args: Vec<String>) -> Result<(), String> {
     let _ = command::run(Some(args));

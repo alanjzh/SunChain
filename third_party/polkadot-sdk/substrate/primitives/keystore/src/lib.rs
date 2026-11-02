@@ -384,6 +384,35 @@ pub trait Keystore: Send + Sync {
 	/// Returns `true` iff all private keys could be found.
 	fn has_keys(&self, public_keys: &[(Vec<u8>, KeyTypeId)]) -> bool;
 
+	/// Sign using Sunchain's custom SFF BLS scheme. Implementations that do not
+	/// support SFF may keep the default `KeyNotSupported` result.
+	fn sff_sign(
+		&self,
+		_key_type: KeyTypeId,
+		_public: &[u8],
+		_msg: &[u8],
+	) -> Result<Option<Vec<u8>>, Error> {
+		Err(Error::KeyNotSupported(_key_type))
+	}
+
+	/// Create an SFF proof-of-possession for a stored public key.
+	fn sff_generate_proof_of_possession(
+		&self,
+		_key_type: KeyTypeId,
+		_public: &[u8],
+	) -> Result<Option<Vec<u8>>, Error> {
+		Err(Error::KeyNotSupported(_key_type))
+	}
+
+	/// Generate and persist an SFF key, returning its raw public key.
+	fn sff_generate_new(
+		&self,
+		key_type: KeyTypeId,
+		_seed: Option<&[u8]>,
+	) -> Result<Vec<u8>, Error> {
+		Err(Error::KeyNotSupported(key_type))
+	}
+
 	/// Convenience method to sign a message using the given key type and a raw public key
 	/// for secret lookup.
 	///
@@ -674,6 +703,31 @@ impl<T: Keystore + ?Sized> Keystore for Arc<T> {
 
 	fn has_keys(&self, public_keys: &[(Vec<u8>, KeyTypeId)]) -> bool {
 		(**self).has_keys(public_keys)
+	}
+
+	fn sff_sign(
+		&self,
+		key_type: KeyTypeId,
+		public: &[u8],
+		msg: &[u8],
+	) -> Result<Option<Vec<u8>>, Error> {
+		(**self).sff_sign(key_type, public, msg)
+	}
+
+	fn sff_generate_proof_of_possession(
+		&self,
+		key_type: KeyTypeId,
+		public: &[u8],
+	) -> Result<Option<Vec<u8>>, Error> {
+		(**self).sff_generate_proof_of_possession(key_type, public)
+	}
+
+	fn sff_generate_new(
+		&self,
+		key_type: KeyTypeId,
+		seed: Option<&[u8]>,
+	) -> Result<Vec<u8>, Error> {
+		(**self).sff_generate_new(key_type, seed)
 	}
 }
 

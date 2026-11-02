@@ -17,6 +17,9 @@ mod client;
 mod exchange_pool;
 mod exchange_p2p;
 mod exchange_proposer;
+mod fast_finality_p2p;
+mod fast_finality_pool;
+mod fast_finality;
 mod pricefeed;
 mod oracle_feed;
 // Mirrors `lib.rs`: these files are compiled into both targets, so a module declared in one

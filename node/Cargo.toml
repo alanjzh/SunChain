@@ -69,6 +69,9 @@ sc-transaction-pool-api.workspace = true
 sc-transaction-pool.default-features = true
 sc-transaction-pool.workspace = true
 sunchain-runtime.workspace = true
+sff-primitives = { workspace = true, features = ["std"] }
+sff-crypto = { workspace = true, default-features = false }
+sff-verifier = { workspace = true, default-features = false }
 sunlead-primitives = { workspace = true, features = ["std"] }
 sunlead-verifier = { path = "../crates/sunlead-verifier", default-features = false }
 sunlead-schedule = { path = "../crates/sunlead-schedule", default-features = false }
@@ -191,7 +194,7 @@ default = [
 	"txpool",
 	"rpc-binary-search-estimate",
 	]
-std = ["sunchain-runtime/std", "node-inspect", "sunlead-verifier/std", "sunlead-schedule/std", "sp-consensus-slots/std"]
+std = ["sunchain-runtime/std", "node-inspect", "sunlead-verifier/std", "sunlead-schedule/std", "sp-consensus-slots/std", "sff-primitives/std", "sff-crypto/std", "sff-verifier/std"]
 # Dependencies that are only required if runtime benchmarking should be build.
 runtime-benchmarks = [
 	"frame-benchmarking-cli/runtime-benchmarks",

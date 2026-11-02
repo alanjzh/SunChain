@@ -19,8 +19,11 @@ pub use pallet_exchange_core::types::{
     TimeInForce,
 };
 
-pub type ExchangeSignedAction =
-    pallet_exchange_core::types::SignedExchangeAction<ExchangeSigner, ExchangeSignature, BlockNumber>;
+pub type ExchangeSignedAction = pallet_exchange_core::types::SignedExchangeAction<
+    ExchangeSigner,
+    ExchangeSignature,
+    BlockNumber,
+>;
 
 sp_api::decl_runtime_apis! {
     /// Pre-validation for the exchange transaction pool (§12.2).
@@ -71,6 +74,23 @@ sp_api::decl_runtime_apis! {
         /// Whether SunLead is the currently active authoring consensus.
         fn is_active() -> bool;
     }
+
+    /// Sunchain Fast Finality (SFF) F2 shadow API.
+    ///
+    /// Exposes the candidate SFF authority set for a given GRANDPA/`set_id`, built
+    /// from the elected session validators, their staking exposure (stake) and the
+    /// BLS keys registered via `pallet_fast_finality`. The node re-validates the
+    /// proof-of-possession off-chain before trusting any key; the set returned here
+    /// is therefore only a *candidate*. SFF does NOT replace GRANDPA finality.
+    pub trait FastFinalityApi {
+        /// The current GRANDPA authority-set id, which SFF reuses as its `set_id`.
+        fn fast_finality_current_set_id() -> u64;
+        /// The candidate SFF authority set for `set_id`, or `None` if that set is
+        /// not the active one or any elected validator has not yet registered a BLS
+        /// key.
+        ///
+        fn fast_finality_authorities(set_id: u64) -> Option<sff_primitives::FinalityAuthoritySet>;
+    }
 }
 
 use sp_api::impl_runtime_apis;
@@ -94,7 +114,7 @@ use sp_version::RuntimeVersion;
 //for frontier
 use pallet_ethereum::{Call::transact, Transaction as EthereumTransaction};
 
-use crate::configs::{ExchangeSigner, ExchangeSignature};
+use crate::configs::{ExchangeSignature, ExchangeSigner};
 use crate::{BlockNumber, Ethereum, UncheckedExtrinsic};
 
 // Local module imports
@@ -767,6 +787,70 @@ impl_runtime_apis! {
 
         fn is_active() -> bool {
             pallet_sunlead::Pallet::<Runtime>::is_active()
+        }
+    }
+
+    impl self::FastFinalityApi<Block> for Runtime {
+        fn fast_finality_current_set_id() -> u64 {
+            pallet_grandpa::CurrentSetId::<Runtime>::get()
+        }
+
+        fn fast_finality_authorities(
+            set_id: u64,
+        ) -> Option<sff_primitives::FinalityAuthoritySet> {
+            // SFF reuses the GRANDPA set id; only serve the currently active set.
+            if set_id != pallet_grandpa::CurrentSetId::<Runtime>::get() {
+                return None;
+            }
+            let validators = pallet_session::Validators::<Runtime>::get();
+            let era = pallet_staking::Pallet::<Runtime>::active_era()?.index;
+            let mut authorities: Vec<sff_primitives::FinalityAuthority> =
+                Vec::with_capacity(validators.len());
+            for account in validators.iter() {
+                let keys = pallet_session::NextKeys::<Runtime>::get(account)?;
+                // An all-zero `sffb` means the validator never provisioned a BLS
+                // key, so no authority set can be assembled at all.
+                if keys.sffb.0.is_zero() {
+                    return None;
+                }
+                // The session key is authoritative for validator identity. An
+                // on-chain registration is preferred (it carries the
+                // proof-of-possession); a stale/rotated registration must not
+                // enter the set. With no registration yet the session key is used
+                // with an empty PoP, which lets the dev/local shadow path run —
+                // the node re-validates the PoP off-chain and reports it.
+                let (bls_public_key, pop) =
+                    match pallet_fast_finality::BlsKeys::<Runtime>::get(account) {
+                        Some((registered_pk, pop)) => {
+                            if registered_pk != keys.sffb.0 {
+                                return None;
+                            }
+                            (registered_pk, pop)
+                        }
+                        None => (keys.sffb.0, sff_primitives::BlsSignature::ZERO),
+                    };
+                let grandpa_id = H256::from_slice(keys.grandpa.as_ref());
+                // AccountId is H160 (20 bytes); left-pad to 32 for the H256 identifier.
+                let mut buf = [0u8; 32];
+                let a = account.encode();
+                let n = a.len().min(32);
+                buf[32 - n..].copy_from_slice(&a[a.len() - n..]);
+                let validator_id = H256(buf);
+                let exposure = pallet_staking::Pallet::<Runtime>::eras_stakers(era, account);
+                // `exposure.total` is already `u128` (the runtime `Balance`).
+                let stake: u128 = exposure.total;
+                authorities.push(sff_primitives::FinalityAuthority {
+                    validator_id,
+                    grandpa_id,
+                    bls_public_key,
+                    proof_of_possession: pop,
+                    stake,
+                });
+            }
+            // Activation block is not tracked here; 0 is acceptable for the shadow
+            // phase (it only affects the set's identifying tuple that the node
+            // re-derives when it re-validates the snapshot).
+            sff_primitives::FinalityAuthoritySet::new(set_id, 0u32, authorities)
         }
     }
 

@@ -11243,6 +11243,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "pallet-fast-finality"
+version = "0.1.0"
+dependencies = [
+ "frame-benchmarking",
+ "frame-support",
+ "frame-system",
+ "parity-scale-codec",
+ "scale-info",
+ "sff-primitives",
+ "sp-core 37.0.0",
+ "sp-io",
+ "sp-runtime",
+ "sp-std 14.0.0",
+]
+
+[[package]]
 name = "pallet-fast-unstake"
 version = "40.0.0"
 dependencies = [
@@ -17734,6 +17750,8 @@ dependencies = [
  "array-bytes 6.2.3",
  "parking_lot 0.12.4",
  "serde_json",
+ "sff-crypto",
+ "sff-primitives",
  "sp-application-crypto",
  "sp-core 37.0.0",
  "sp-keystore",
@@ -19151,6 +19169,43 @@ checksum = "a84f14a19e9a014bb9f4512488d9829a68e04ecabffb0f9904cd1ace94598177"
 dependencies = [
  "base16ct",
  "serde",
+]
+
+[[package]]
+name = "sff-crypto"
+version = "0.1.0"
+dependencies = [
+ "ark-bls12-381 0.4.0",
+ "ark-ec 0.4.2",
+ "ark-ff 0.4.2",
+ "ark-serialize 0.4.2",
+ "ark-std 0.4.0",
+ "parity-scale-codec",
+ "sff-primitives",
+ "sff-verifier",
+ "sp-core 37.0.0",
+ "sp-crypto-hashing 0.1.0",
+]
+
+[[package]]
+name = "sff-primitives"
+version = "0.1.0"
+dependencies = [
+ "parity-scale-codec",
+ "scale-info",
+ "sp-core 37.0.0",
+ "sp-crypto-hashing 0.1.0",
+ "sp-runtime",
+]
+
+[[package]]
+name = "sff-verifier"
+version = "0.1.0"
+dependencies = [
+ "parity-scale-codec",
+ "sff-primitives",
+ "sp-core 37.0.0",
+ "sp-crypto-hashing 0.1.0",
 ]
 
 [[package]]
@@ -22111,6 +22166,9 @@ dependencies = [
  "sc-transaction-pool-api",
  "serde",
  "serde_json",
+ "sff-crypto",
+ "sff-primitives",
+ "sff-verifier",
  "sp-api",
  "sp-application-crypto",
  "sp-authority-discovery",
@@ -22203,6 +22261,7 @@ dependencies = [
  "pallet-evm-precompile-sha3fips",
  "pallet-evm-precompile-simple",
  "pallet-exchange-core",
+ "pallet-fast-finality",
  "pallet-grandpa",
  "pallet-im-online",
  "pallet-insurance",
@@ -22223,19 +22282,25 @@ dependencies = [
  "scale-info",
  "serde",
  "serde_json",
+ "sff-crypto",
+ "sff-primitives",
  "sp-api",
+ "sp-application-crypto",
  "sp-authority-discovery",
  "sp-block-builder",
  "sp-consensus-aura",
  "sp-consensus-babe",
  "sp-consensus-grandpa",
  "sp-core 37.0.0",
+ "sp-externalities 0.30.0",
  "sp-genesis-builder",
  "sp-inherents",
  "sp-io",
  "sp-keyring",
+ "sp-keystore",
  "sp-offchain",
  "sp-runtime",
+ "sp-runtime-interface 30.0.0",
  "sp-session",
  "sp-staking",
  "sp-storage 22.0.0",

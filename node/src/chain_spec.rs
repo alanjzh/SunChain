@@ -1,36 +1,34 @@
-use sc_service::{ChainType, Properties};
-use sunchain_runtime::WASM_BINARY;
 use ecdsa_keyring::Keyring;
+use sc_service::{ChainType, Properties};
+use sunchain_runtime::configs::SffSessionPublic;
+use sunchain_runtime::WASM_BINARY;
 
 use crate::chain_spec::initial_config::staging_sunchain_genesis_patch;
 
+pub mod dex_genesis;
 pub mod initial_config;
 pub mod sunchain_spec;
-pub mod dex_genesis;
-use sunchain_runtime::BABE_GENESIS_EPOCH_CONFIG;
 use sp_runtime::Perbill;
+use sunchain_runtime::BABE_GENESIS_EPOCH_CONFIG;
 pub use sunchain_runtime::{
-	Block, AccountId, Balance, UNIT,
-	configs::{
-		COLLATERAL_ASSET_DECIMALS, COLLATERAL_ASSET_ID, COLLATERAL_ASSET_MIN_BALANCE, SessionKeys,
-	},
+    configs::{
+        SessionKeys, COLLATERAL_ASSET_DECIMALS, COLLATERAL_ASSET_ID, COLLATERAL_ASSET_MIN_BALANCE,
+    },
+    AccountId, Balance, Block, UNIT,
 };
 pub const ENDOWMENT: Balance = 1_000_000 * UNIT;
 
 /// Genesis endowment of the Phase 1 test USDC, in asset atomic units (6 decimals).
 pub const TEST_USDC_ENDOWMENT: u128 = 1_000_000_000_000u128; // 1,000,000 USDC
-use sp_consensus_babe::AuthorityId as BabeId;
-use sp_authority_discovery::AuthorityId as AuthorityDiscoveryId;
-use sp_consensus_grandpa::AuthorityId as GrandpaId;
 use pallet_im_online::sr25519::AuthorityId as ImOnlineId;
-use sunlead_primitives::SunLeadId;
-use sp_core::{crypto::UncheckedInto, ecdsa, sr25519, Pair, Public, H160, U256};
-use sp_staking::{
-	StakerStatus,
-};
-use serde::{Deserialize, Serialize};
 use sc_chain_spec::ChainSpecExtension;
-
+use serde::{Deserialize, Serialize};
+use sp_authority_discovery::AuthorityId as AuthorityDiscoveryId;
+use sp_consensus_babe::AuthorityId as BabeId;
+use sp_consensus_grandpa::AuthorityId as GrandpaId;
+use sp_core::{crypto::UncheckedInto, ecdsa, sr25519, Pair, Public, H160, U256};
+use sp_staking::StakerStatus;
+use sunlead_primitives::SunLeadId;
 
 /// Specialized `ChainSpec`. This is a specialization of the general Substrate ChainSpec type.
 /// /// Node `ChainSpec` extensions.
@@ -60,6 +58,8 @@ fn session_keys(
     authority_discovery: AuthorityDiscoveryId,
     // sr25519 (SunLead deterministic-leader session key)
     sunl: SunLeadId,
+    // BLS12-381 (SFF shadow session key)
+    sffb: SffSessionPublic,
 ) -> SessionKeys {
     SessionKeys {
         grandpa,
@@ -67,9 +67,41 @@ fn session_keys(
         im_online,
         authority_discovery,
         sunl,
+        sffb,
     }
 }
 
+/// DEV-ONLY: the deterministic `sffb` (BLS) session key for a genesis dev
+/// validator.
+///
+/// It mirrors exactly what the node's keystore produces for the same seed via
+/// `Keystore::sff_generate_new(key_type, Some(seed))`, which is
+/// `BlsKeypair::from_seed(blake2_256(seed))` whenever the keystore has no
+/// password (see `sc-keystore/src/local.rs`). Genesis therefore advertises the
+/// very public key whose secret the dev node actually holds, so the node can
+/// sign SFF votes for it.
+///
+/// Any account that is not one of the two dev validators gets an all-zero key,
+/// which leaves the staging spec exactly as before (and keeps SFF dormant
+/// there until real `sffb` keys are generated and registered).
+fn dev_sffb_for(account: &AccountId) -> SffSessionPublic {
+    let zero = || {
+        sunchain_runtime::configs::SffSessionPublic(sff_primitives::BlsPublicKey([0; 96]))
+    };
+    let alith: AccountId = Keyring::Alith.into();
+    let baltathar: AccountId = Keyring::Baltathar.into();
+    // Must match `config.dev_key_seed` of the corresponding dev node
+    // (`--alice` => "//Alice", `--bob` => "//Bob").
+    let seed: &[u8] = if *account == alith {
+        b"//Alice"
+    } else if *account == baltathar {
+        b"//Bob"
+    } else {
+        return zero();
+    };
+    let keypair = sff_crypto::BlsKeypair::from_seed(&sp_core::hashing::blake2_256(seed));
+    sunchain_runtime::configs::SffSessionPublic(keypair.public())
+}
 
 /// The accounts that receive a genesis balance in the dev/local chain specs.
 fn default_endowed_accounts() -> Vec<AccountId> {
@@ -138,7 +170,8 @@ fn configure_accounts(
     usize,
     Vec<(AccountId, AccountId, Balance, StakerStatus<AccountId>)>,
 ) {
-    let mut endowed_accounts: Vec<AccountId> = endowed_accounts.unwrap_or_else(default_endowed_accounts);
+    let mut endowed_accounts: Vec<AccountId> =
+        endowed_accounts.unwrap_or_else(default_endowed_accounts);
     // endow all authorities and nominators.
     initial_authorities
         .iter()
@@ -207,6 +240,9 @@ pub fn testnet_genesis(
                             x.4.clone(),
                             x.5.clone(),
                             x.6.clone(),
+                            // BLS shadow key: deterministic for the two dev
+                            // validators, all-zero for anyone else.
+                            dev_sffb_for(&x.0),
                         ),
                     )
                 })
@@ -256,7 +292,6 @@ pub fn testnet_genesis(
     genesis
 }
 
-
 /// Helper function to generate a crypto pair from seed.
 pub fn get_from_seed<TPublic: Public>(seed: &str) -> <TPublic::Pair as Pair>::Public {
     TPublic::Pair::from_string(&format!("//{}", seed), None)
@@ -278,9 +313,9 @@ pub fn authority_keys_from_alice() -> (
     (
         Keyring::Alith.into(),
         Keyring::Alith.into(),
-		// sp_keyring::Sr25519Keyring::Alice.public().into(),
+        // sp_keyring::Sr25519Keyring::Alice.public().into(),
         get_from_seed::<GrandpaId>(seed),
-		// sp_keyring::Ed25519Keyring::Alice.public().into(),
+        // sp_keyring::Ed25519Keyring::Alice.public().into(),
         get_from_seed::<BabeId>(seed),
         get_from_seed::<ImOnlineId>(seed),
         get_from_seed::<AuthorityDiscoveryId>(seed),
@@ -309,14 +344,12 @@ pub fn authority_keys_from_bob() -> (
     )
 }
 
-
-
 fn development_config_genesis_json() -> serde_json::Value {
     let extra_endowed_accounts_balance = vec![
-		// (Keyring::Alith.into(), 100_000_000_000_000 * UNIT),
-		// NOTE: Baltathar is now an authority, so it is auto-endowed via `configure_accounts`.
-		// Adding it here too would duplicate its balance entry and trip the genesis assert.
-		];
+    // (Keyring::Alith.into(), 100_000_000_000_000 * UNIT),
+    // NOTE: Baltathar is now an authority, so it is auto-endowed via `configure_accounts`.
+    // Adding it here too would duplicate its balance entry and trip the genesis assert.
+    ];
     testnet_genesis(
         vec![authority_keys_from_alice(), authority_keys_from_bob()],
         vec![],
@@ -328,39 +361,38 @@ fn development_config_genesis_json() -> serde_json::Value {
 }
 
 pub fn development_chain_spec() -> Result<ChainSpec, String> {
-	let mut properties = Properties::new();
-	properties.insert("tokenSymbol".into(), "SUN".into());
+    let mut properties = Properties::new();
+    properties.insert("tokenSymbol".into(), "SUN".into());
     properties.insert("tokenDecimals".into(), 18.into());
     properties.insert("isEthereum".into(), true.into());
 
-
-	Ok(ChainSpec::builder(
-		WASM_BINARY.ok_or_else(|| "Development wasm not available".to_string())?,
-		Default::default(),
-	)
-	.with_name("SunChainDev")
-	.with_id("SUN")
-	.with_chain_type(ChainType::Development)
-	.with_properties(properties)	
-	// .with_genesis_config_preset_name(sp_genesis_builder::DEV_RUNTIME_PRESET)
-	.with_genesis_config_patch(development_config_genesis_json())
-	.build())
+    Ok(ChainSpec::builder(
+        WASM_BINARY.ok_or_else(|| "Development wasm not available".to_string())?,
+        Default::default(),
+    )
+    .with_name("SunChainDev")
+    .with_id("SUN")
+    .with_chain_type(ChainType::Development)
+    .with_properties(properties)
+    // .with_genesis_config_preset_name(sp_genesis_builder::DEV_RUNTIME_PRESET)
+    .with_genesis_config_patch(development_config_genesis_json())
+    .build())
 }
 
 pub fn local_chain_spec() -> Result<ChainSpec, String> {
-	Ok(ChainSpec::builder(
-		WASM_BINARY.ok_or_else(|| "Development wasm not available".to_string())?,
-		Default::default(),
-	)
-	.with_name("Local Testnet")
-	.with_id("local_testnet")
-	.with_chain_type(ChainType::Local)
-	.with_genesis_config_preset_name(sp_genesis_builder::LOCAL_TESTNET_RUNTIME_PRESET)
-	// The runtime preset does not create the Phase 1 test USDC; patch it in (the patch is
-	// merged onto the preset) so `local` has the same collateral asset as `dev`.
-	.with_genesis_config_patch(test_usdc_genesis_json(
-		Keyring::Alith.into(),
-		default_endowed_accounts(),
-	))
-	.build())
+    Ok(ChainSpec::builder(
+        WASM_BINARY.ok_or_else(|| "Development wasm not available".to_string())?,
+        Default::default(),
+    )
+    .with_name("Local Testnet")
+    .with_id("local_testnet")
+    .with_chain_type(ChainType::Local)
+    .with_genesis_config_preset_name(sp_genesis_builder::LOCAL_TESTNET_RUNTIME_PRESET)
+    // The runtime preset does not create the Phase 1 test USDC; patch it in (the patch is
+    // merged onto the preset) so `local` has the same collateral asset as `dev`.
+    .with_genesis_config_patch(test_usdc_genesis_json(
+        Keyring::Alith.into(),
+        default_endowed_accounts(),
+    ))
+    .build())
 }

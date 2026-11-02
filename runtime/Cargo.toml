@@ -35,6 +35,7 @@ pallet-oracle.workspace = true
 pallet-insurance.workspace = true
 pallet-liquidation.workspace = true
 pallet-sunlead.workspace = true
+pallet-fast-finality.workspace = true
 exchange-primitives.workspace = true
 pallet-transaction-payment-rpc-runtime-api.workspace = true
 pallet-transaction-payment.workspace = true
@@ -58,6 +59,12 @@ sp-version = { features = ["serde"], workspace = true }
 
 sunlead-primitives = { workspace = true, default-features = false }
 sunlead-schedule = { workspace = true, default-features = false }
+sff-primitives = { workspace = true, default-features = false }
+sff-crypto = { workspace = true, default-features = false }
+sp-application-crypto = { workspace = true, default-features = false }
+sp-externalities = { workspace = true, default-features = false }
+sp-keystore = { workspace = true, default-features = false }
+sp-runtime-interface = { workspace = true, default-features = false }
 
 sp-authority-discovery.workspace = true
 sp-consensus-babe.workspace = true
@@ -131,6 +138,7 @@ std = [
 	"pallet-exchange-core/std",
 	"pallet-oracle/std",
 	"pallet-sunlead/std",
+	"pallet-fast-finality/std",
 	"pallet-insurance/std",
 	"pallet-liquidation/std",
 	"exchange-primitives/std",
@@ -141,6 +149,11 @@ std = [
 	"sp-api/std",
 	"sunlead-primitives/std",
 	"sunlead-schedule/std",
+	"sff-primitives/std",
+	"sp-application-crypto/std",
+	"sp-externalities/std",
+	"sp-keystore/std",
+	"sp-runtime-interface/std",
 	"sp-block-builder/std",
 	"sp-consensus-aura/std",
 	"sp-consensus-grandpa/std",
@@ -203,6 +216,7 @@ runtime-benchmarks = [
 	"pallet-exchange-core/runtime-benchmarks",
 	"pallet-oracle/runtime-benchmarks",
 	"pallet-sunlead/runtime-benchmarks",
+	"pallet-fast-finality/runtime-benchmarks",
 	"pallet-insurance/runtime-benchmarks",
 	"sp-runtime/runtime-benchmarks",
 	"pallet-staking/runtime-benchmarks",
@@ -227,6 +241,7 @@ try-runtime = [
 	"pallet-sudo/try-runtime",
 	"pallet-template/try-runtime",
 	"pallet-sunlead/try-runtime",
+	"pallet-fast-finality/try-runtime",
 	"pallet-timestamp/try-runtime",
 	"pallet-assets/try-runtime",
 	# Same cfg-mismatch class as `fp-self-contained`: the *implementor* needs the feature, not

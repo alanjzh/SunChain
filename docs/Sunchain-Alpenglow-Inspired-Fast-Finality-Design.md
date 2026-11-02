@@ -281,3 +281,181 @@ node/src/
 5. 将“降低 BABE slot 至 1 秒”的可行性作为单独 RFC，依据 F0 的 p99 数据决定，而不与 SFF 绑定上线；
 6. 在 F2 连续稳定前，不开始 F4，也不将 fast confirmation 用于资产不可逆路径。
 
+## 10. F1 实现状态（2026-10-30）
+
+F1（BLS authority snapshot 与 verifier）已实现为三个纯逻辑 / 密码学 crate，**完全离线**，不接入 BABE/GRANDPA、不接入网络、不影响任何既有共识路径。
+
+### 落地代码
+
+| 设计落点 | 实现 |
+|---|---|
+| `crates/sff-primitives` | SCALE 编码的 `Vote` / `QuorumCertificate` / `FinalityAuthoritySet` / `FinalityAuthority`；域分隔标签 `DOMAIN_VOTE` / `DOMAIN_POP`；`canonical_message_bytes`（防跨链/会话/版本重放）；`SignerBitmap`（有界、越界检查）；`signed_stake_of`（独立重算，256 位精确 `> 2/3` 阈值 `exceeds_two_thirds`）；共享 `SffError`。`no_std`。 |
+| `crates/sff-crypto` | BLS12-381 **min-sig**（签名 G1/48B，公钥 G2/96B）封装：keygen、sign/verify、聚合签名/公钥、`verify_aggregate`、PoP（sign/verify）、`verify_qc`（组合 verifier 逻辑 + BLS 校验）、`aggregate_votes`（离线 fixture 构造器）、`authority_set_from_keypairs`。std-only（节点侧）。 |
+| `crates/sff-verifier` | `no_std` + `alloc`：`verify_certificate_logic`（set/snapshot 绑定、bitmap 边界、独立 stake 重算、`> 2/3` 阈值、payload-hash、phase 不变量）；`LockTracker` 两阶段锁状态机（Prepare→Commit 门控、冲突检测）；`detect_vote_equivocation` / `detect_qc_equivocation` 可证明违规证据。`rust` |
+
+### 测试向量与负向覆盖
+
+全部 22 个单测通过（`sff-primitives` 4、`sff-verifier` 8、`sff-crypto` 10），覆盖设计 §7 的安全性质：重复 key/bitmap 越界、stake 溢出、set rotation（snapshot 重放拒绝）、恶意 aggregate（低于阈值、错误 set_id、篡改 bitmap/signature、跨 snapshot 重放）、双签与 Prepare/Commit 冲突的违规证据。
+
+固定可复现向量（交叉实现锚点）：`BlsKeypair::from_seed([0x01;32])` 的公钥已钉入 `sff-crypto` 的 `FIXED_VECTOR_PK` 常量，任何按文档流程独立重实现的实现必须产出相同字节。
+
+### 已知限制（F1 明确范围内）
+
+1. **hash-to-curve 为 try-and-increment**（`y^2 = x^3 + 4` 上计数查找），非 RFC 9380 最优 SWU。它确定、可逆、可复现，足以支撑 F1 离线 fixture 与交叉实现比对，但**生产前须替换为经审计的 RFC 9380 映射**（设计 §8.2）。
+2. 子群检查用 `r·P == 0`（r 为 BLS12-381 标量域素数），cofactor clearing 用协议常数 `z = -0xd201000000010000` 推导的 `h1 = (z-1)^2/3`，无硬编码魔数。
+3. **F1 不接网络**：无 notification protocol、无 pool、无 aggregator 扇出、无 observer。这些属于 F2（shadow vote/certificate）。
+4. F1 验收时 `FinalityAuthoritySet` 仍是纯内存结构；runtime session snapshot、`sffb` 和 `FastFinalityApi` 已在 F2 接线，具体实现见 §11.1。
+
+### F1 Gate 评估
+
+- [x] 独立实现得到完全相同的 certificate verdict（primitives 阈值/锁逻辑 + crypto BLS 校验在单 crate 内一致实现）。
+- [x] 固定可复现测试向量（公钥已钉入常量）。
+- [x] 负向向量覆盖重复 key、bitmap 越界、stake 溢出、set rotation、恶意 aggregate、域/会话重放、双签/冲突证据。
+- [x] 形式化状态机覆盖安全不变量（F1 gate 收尾项）：
+  - `docs/sff-f1-formal/SFFFinality.tla` + `SFFFinality.cfg`：TLA+ 规格，形式化陈述三条安全不变量 —— `SafetyInv`（同 `(height,round,phase)` 两冲突 commit 必共享 `> 1/3` stake，即任何安全破坏都需 `> 1/3` 双签，在 `< 1/3` Byzantine 假设下不可能）、`LockInv`（commit 必引用同 `(height,round,block)` 的 prepare）、`QuorumInv`（证书严格 `> 2/3`）。可用 TLC 在 `Nodes={n1..n4}`、4 节点均匀 stake、2 区块/2 高度/1 轮次下模型检验。
+  - `crates/sff-verifier/src/lib.rs` 的 `mod model_check`：可执行的有界穷举模型检验，作为 TLA+ 不变量在真实代码上的 CI 可验证对应物。它对每个 1..5 委员会 + 多个加权 stake 配置穷举所有 `> 2/3` 法定证书与每个可达 `LockTracker` 状态（DFS 深度 4），断言：(1) **quorum-intersection 引理**——两冲突证书签名者交集 stake 严格 `> 1/3`（即 `3·inter > total`）；(2) **equivocation 完备性**——每个冲突对都被 `detect_qc_equivocation` / `detect_vote_equivocation` 捕获；(3) **锁安全**——`LockTracker` 任一层高不会记录两个不同 commit 块，且冲突 commit 必被拒。覆盖 `n∈{2..5}` 的全部投票双签组合（含 block/parent/prepare_qc 差异）。
+  - 运行：`cargo test -p sff-verifier model_check`（`model_check_certificate_safety` + `model_check_vote_equivocation` 两个测试，约 0.1s 通过）。
+
+## 11. F2 实现状态（2026-10-30）
+
+F2（shadow vote / certificate 网络接线）已实现：**节点在成功 import+execute 后发送 direct vote；本地聚合生成 PrepareQC / CommitQC，但不影响 fork choice、Runtime 或用户最终性**；observer 仅将每个 CommitQC 的区块与 GRANDPA finalized 链做对照，日志/metrics 告警，且任何 SFF 异常都不得中断 BABE/GRANDPA。F2 任务作为非核心任务（non-essential task）启动，`panic` 或 stall 不会影响既有共识。
+
+### 代码落点
+
+**Runtime 侧（设计 §5 的 `pallets/fast-finality`、`runtime/src/apis.rs`）**
+
+| 落点 | 实现 |
+|---|---|
+| `pallets/fast-finality` | 新增 pallet：以 `AccountId` 为键存储每个验证人的 BLS12-381 公钥（G2/96B）+ proof-of-possession；`register_bls_key(pk, pop)` 外因（链下节点验 PoP，runtime `no_std` 无法做 BLS）。仅存储，不参与 BABE/GRANDPA 记账。 |
+| `runtime/src/apis.rs` | 新增 `FastFinalityApi`：`fast_finality_current_set_id()`（复用 GRANDPA `CurrentSetId`）+ `fast_finality_authorities(set_id)` —— 从 `pallet_session::Validators`、`NextKeys.sffb`、`pallet_staking` exposure（stake）和 `pallet_fast_finality::BlsKeys` PoP 组装 `FinalityAuthoritySet`。注册 key 必须与当前 session key 相同；validator_id 由 AccountId 左补零为 H256，grandpa_id 取自 session key。 |
+
+**Node 侧（设计 §5 的 `fast_finality_network.rs` / `pool.rs` / `voter.rs` / `aggregator.rs` / `observer.rs`）**
+
+| 落点 | 实现 |
+|---|---|
+| `node/src/fast_finality_p2p.rs` | 版本化专属 notification protocol（`/sun/sff/1`），gossip 循环镜像 `exchange_p2p` 的 DoS 加固：尺寸检查 → 去重（`SeenKey`）→ 按高度窗口限速 → **BLS 验签后才中继**（无效流量绝不放大）；`Repair` 请求仅回给询问方。 |
+| `node/src/fast_finality_pool.rs` | 有界池：按 `(set_id,phase,height,round)` 收集 vote/QC、两阶段 `LockTracker`、CommitQC 快照；聚合达 `> 2/3` 才产出 QC，CommitQC 必须引用同集合、同高度、同轮次、同区块的 PrepareQC。 |
+| `node/src/fast_finality.rs` | `FastFinalityEngine`：仅对新 best import 签 Prepare vote，并在每个 `(set_id,height,round)` 至多签一个 Prepare 目标；收到/生成 PrepareQC 后签 Commit vote；周期性聚合与 observer。Authority snapshot root 改变时重新解析 signer index。 |
+| `node/src/service.rs` | 注册 SFF notification protocol；spawn SFF gossip 任务（validate+relay）与 SFF engine 任务（import 驱动投票 + 聚合 + observer），均为 non-essential。 |
+
+### F2.1 `sffb` session key 与 keystore signer（方案 B）
+
+F2 signer 已从 dev seed 派生切换为 `KeystoreSffSigner`。选择方案 B：保留 Sunchain 当前 `sff-crypto` 的 BLS12-381 min-sig 编码和域分离，不直接复用 SDK experimental BLS key type；SDK key type 的公钥/签名格式与 Sunchain 的 G2/96-byte 公钥、G1/48-byte 签名不兼容。为此增加应用专用 keystore 操作，不把 `BlsKeypair` 或私钥传进共识引擎。
+
+落地路径：
+
+1. `runtime/src/configs/mod.rs` 定义 `SffSessionPublic` / `SffSessionKey` 并将 `sffb` 加入 `SessionKeys`。`SffSessionPublic` 实现 `RuntimeAppPublic`：生成、公钥枚举、签名和 PoP 生成调用自定义 host function；验签和 PoP 验证使用 `sff-crypto`。
+2. `runtime/src/sff_keystore.rs` 定义 `SffKeystore` runtime interface，提供生成密钥、公钥枚举、签名和 PoP 操作。节点在 `service::HostFunctions` 中注册该接口。生成操作在 keystore 后端内完成，runtime 只接收公钥；签名操作只把消息和公钥交给后端并取回签名。
+3. `sp_keystore::Keystore` 增加 SFF 专用扩展操作。`sc-keystore::LocalKeystore` 实现密钥生成、签名和 PoP：根据 key type 和公钥定位 keystore 条目，在本地重建密钥对、校验公钥与条目匹配，然后只返回签名结果。配置了 keystore password 时，生成与签名使用相同的 password 派生路径（`Blake2(seed || password)`）。seed 按 LocalKeystore 的 SURI 条目格式持久化；此实现没有另加静态加密层，keystore 文件访问权限和 password 管理由节点部署负责，不能把它视作 HSM 或加密文件 keystore。
+4. 节点 `KeystoreSffSigner` 持有 `KeystorePtr`，用 `keys(sffb)` 查找本机公钥、用 `sff_sign(sffb, public, payload)` 签名。F2 引擎只获得公钥和签名，不接收私钥。自定义/HSM keystore 可实现相同的 `Keystore` SFF 操作；未实现这些操作的后端会返回 `KeyNotSupported`。
+5. 新链现有 staging genesis 没有 SFF 私钥材料，因此 `sffb` 初值是全零占位，**不从公开 BABE/GRANDPA 公钥推导 SFF 密钥**。`FastFinalityApi` 在 key 为零、PoP 未注册或注册公钥与 `NextKeys.sffb` 不一致时不提供 authority set。验证人轮换出真实 `sffb` 并注册其公钥与 PoP 后才加入 SFF set。
+
+操作流程：在允许 unsafe RPC 的本机管理接口调用 `sff_rotateKeys`。该方法与 `author_rotateKeys` 一样生成并保存完整 session key set，同时返回 `sessionKeys`（可供 `session.set_keys` 使用）、`sffPublicKey` 和 `proofOfPossession`。validator 使用 `sessionKeys` 提交 `session.set_keys`，再用公钥与 PoP 调用 `pallet_fast_finality::register_bls_key`。RPC 不自动提交链上交易；validator 仍需使用自己的账户签名并等待 session key 生效。此 RPC 会新生成一组 session keys，不要把它当作只查询命令。
+
+自定义 keystore 后端也必须实现 `sff_generate_new`、`sff_sign`、`sff_generate_proof_of_possession` 三项操作才能参与 SFF；当前 LocalKeystore 的 SURI seed 沿用标准 keystore 文件存储方式，且没有额外静态加密层，部署者须保护 keystore 目录与管理 RPC。
+
+### 自检
+
+- `cargo check -p sunchain-runtime` 通过（运行时已用 `SKIP_WASM_BUILD=1` 跳过 WASM 重编）。
+- `cargo check -p sunchain`（lib + bin）通过。
+- keystore signer / `RuntimeAppPublic` / host bridge 接线后再次运行 `RUSTC_WRAPPER= SKIP_WASM_BUILD=1 cargo check -p sunchain --quiet`，通过；该检查跳过 WASM 重编，未替代两节点签名与 PoP 注册流程验证。
+- `cargo test -p sc-keystore sff_` 3 项通过：除原有 `sff_key_generation_signing_pop_and_password_round_trip`（SFF key 生成/枚举、正确签名与 PoP、篡改签名、错误/缺失公钥、keystore password、不支持 SFF 的 backend）外，新增 `sff_operations_are_forwarded_through_a_shared_keystore_ptr` 与 `sff_signing_works_on_an_in_memory_keystore`（见 §11.2）。
+- F1 三个 crate 单测仍全绿（`sff-primitives` 10 / `sff-verifier` 10 / `sff-crypto` 10），`sff-primitives` 仅新增 `Phase: Hash` 派生与统一 `alloc`/`vec!` 前置（为 runtime `std` 编译需要），未改动协议逻辑。
+
+### F2 复核修正（2026-10-30）
+
+- 修复 `BlsSignature` / `BlsPublicKey` 重复 `MaxEncodedLen` 实现导致的编译失败。
+- 按 authority `set_id` 隔离 pool vote/QC/CommitQC 与锁状态；CommitQC 可有界暂存应对网络乱序，并在 PrepareQC 到达后验证关联与锁规则。
+- 只对新 best 区块签 Prepare，并用 `(set_id,height,round)` 本地防双签；observer 正确检查 SFF block 是否为 GRANDPA finalized head 的祖先。
+- P2P 只在 BLS 与 genesis 校验通过后占用 seen key，并对 Repair 请求限速、拒绝 SCALE 尾随垃圾字节。
+- 验证：F1 crate 测试通过；F2 node 定向测试 5 项通过；runtime 与 node check（lib + bin）通过（跳过 WASM build）。两节点链上流程见 §11.1。
+
+### 11.1 dev 两节点端到端验证（2026-11-02）
+
+在 dev 链上真实跑通了 vote → PrepareQC → CommitQC → observer 对照 GRANDPA 的完整影子流程。
+
+**接线方式（仅 dev）**
+
+1. `node/src/chain_spec.rs::dev_sffb_for` 用 `BlsKeypair::from_seed(blake2_256(b"//Alice"))` / `b"//Bob"` 确定性派生 genesis 的 `sffb` session key（非 dev 账户仍为零值）；节点侧 `inject_dev_session_keys` 用**同一 seed** 调 `Keystore::sff_generate_new`，两者是同一条 `blake2_256(seed)` 派生路径，故链上公告的公钥就是节点实际持有私钥的那个公钥。
+2. dev 的 PoP 由 `RuntimeAuthorityProvider` 的 dev 列表按公钥回填。**F1 的 `pop_verify` 校验没有被放宽**——零 PoP 仍会被 `verify_vote` 以 `InvalidPop` 拒绝（早期正是因此出现 `self Prepare vote failed verification; skipping`）。
+3. `FastFinalityApi::fast_finality_authorities` 允许在 `BlsKeys` 未登记时回落到 `NextKeys.sffb`（PoP 记零），但保留"零 key"与"登记公钥 ≠ session key"两个拒绝条件。
+
+**测量结果**（`--chain dev --alice/--bob --validator`，两节点互联，`--fresh`，观察窗口 11:24–11:38，约 14 分钟）
+
+| 指标 | 节点 A（`//Alice`） | 节点 B（`//Bob`） |
+|---|---|---|
+| Prepare vote 签名 | 191 | 197 |
+| Commit vote 签名 | 70 | 110 |
+| PrepareQC | 28 | 71 |
+| CommitQC | 1 | 2 |
+| vote 验签失败 | 0 | 0 |
+| panic | 0 | 0 |
+| best / finalized | #271 / #269 | #271 / #269 |
+
+**核心安全结论（shadow-only）**：两节点 GRANDPA 最终化**完全一致且持续推进**（均 finalized #269、best #271），SFF 全程没有改变 fork choice、runtime 状态或用户最终性，0 panic / 0 stall。这与 §11 的 non-essential 约束一致：SFF 只观测、不干预。
+
+**两阶段与 set 轮换均真实生效**：`set_id` 从 0 推进到 4，说明 authority snapshot 随 session 轮换更新，节点在轮换后仍能解析新的 signer index 并继续签名/聚合。
+
+**样例日志**
+
+```text
+built PrepareQC set_id=0 height=23 round=0 block=Some(0xc82d266f7b7e332abca570fd0701dadf5ad240147ec3603972c58605eefc3a42)
+built PrepareQC set_id=4 height=155 round=0 block=Some(0x0de8c19dd990578a8b0d3932a90b665549fa7c8f222e913c374923e42535e6ca)
+SFF CommitQC height 13 block Some(0x5956ae32bddaaa6edd4c3685d9440eaa881993ba3fb2f0f581dfffc0ee203689)
+  is NOT on the GRANDPA finalized chain (finalized 0xbc7363251906c808314148d9fc513a49a5d8815e85bc001835f9c8857efcb0f8)
+```
+
+最后一条是 observer 的**预期告警**（SFF 领先于 GRANDPA），不是错误；反向（SFF 落后/分叉）时才需要排查。
+
+**本次验证暴露并已处置的缺口**
+
+- `Arc<dyn Keystore>` 未转发 SFF 操作，生产 `KeystoreSffSigner` 当时全部签名返回 `KeyNotSupported`，dev 期间临时改用 `DevSeedSigner` 绕过。**该缺陷已在 §11.2 修复**，dev 与生产现在走同一条 keystore 签名路径。
+- dev 链是 `EthereumSignature`（`AccountId = H160`，secp256k1 + keccak），现有工具链没有可用签名器，因此**生产 `register_bls_key` 仍未在链上真实注册过**；dev 走的是"未登记回落"分支。生产部署必须注册真实公钥 + PoP，否则零 PoP 会被 F1 verifier 拒绝。
+
+### 11.2 `sff_sign` 修复：`Arc<dyn Keystore>` 未转发 SFF 操作（2026-11-02）
+
+**现象**：`KeystoreSffSigner` 每次签名都失败——
+
+```text
+SFF keystore signing failed: Key not supported: KeyTypeId([115, 102, 102, 98])
+```
+
+**根因（不在 `local.rs` 的 `sff_sign`/`sff_pair` 里）**：`KeystorePtr = Arc<dyn Keystore>`，而
+`substrate/primitives/keystore/src/lib.rs` 中的 `impl<T: Keystore + ?Sized> Keystore for Arc<T>`
+**没有转发** `sff_sign` / `sff_generate_proof_of_possession` / `sff_generate_new`。Rust 的方法解析会先命中
+`Arc<T>` 的这个转发实现，于是调用落到 trait 的**默认实现**（对每个 key type 一律返回 `KeyNotSupported`），
+根本没有进入 `LocalKeystore`。任何持有 `KeystorePtr` 的调用方（节点引擎、`sff_rotateKeys` RPC）都会静默
+降级成"后端不支持 SFF"——这也是为什么 `LocalKeystore` 自身单测全绿、线上却全量失败。
+
+**修复**
+
+1. `substrate/primitives/keystore/src/lib.rs`：在 `Arc<T>` 转发实现里补全三个 SFF 方法（`(**self).sff_*`）。
+2. `substrate/client/keystore/src/local.rs`：`sff_generate_new` 在**内存型** keystore（没有 key 文件可读）
+   下把 seed 记入 ephemeral map（新增 `KeystoreInner::insert_ephemeral_seed`），否则刚生成的 key 能被
+   `keys()` 列出却永远签不出名。
+3. `node/src/service.rs`：删除 `DevSeedSigner` 绕过，统一使用 `KeystoreSffSigner`；`DevSeedSigner` 降级为
+   单测内的最小 signer 实现。
+
+**回归验证**
+
+- `cargo test -p sc-keystore sff_` 3 项通过。新增的两个测试直指缺陷：`sff_operations_are_forwarded_through_a_shared_keystore_ptr`
+  走 `KeystorePtr`（去掉转发后精确复现 `KeyNotSupported(KeyTypeId([115,102,102,98]))`），
+  `sff_signing_works_on_an_in_memory_keystore` 覆盖内存型 keystore。
+- dev 两节点重跑（11:56–12:03，**keystore 签名路径**）：A 92 Prepare / 9 Commit / 1 PrepareQC + 1 CommitQC；
+  B 78 Prepare / 54 Commit / 46 PrepareQC。双方 `SFF keystore signing failed` **0 次**、验签失败 0 次、
+  panic 0 次，finalized #115 / #116、best #118 一致。节点日志可见
+  `injected dev sffb session key (seed //Alice) pubkey 0xa4eff6ea…`（`//Bob` 为 `0xad15496e…`），
+  与 dev genesis 公告的公钥逐字节一致。
+
+**遗留观察**：两节点的 QC 数量不对称（A 明显少于 B，此前一轮是 28 vs 71），怀疑是 gossip 限速/聚合时机
+差异而非方向性故障——A 仍能收到 B 的票（至少产出过 QC），且后续轮次比例会变化。shadow 模式下无安全影响，待查。
+
+### 已知偏离 / 限制（F2 明确范围内）
+
+1. **新链 genesis 尚未配置有效 `sffb`**：session key 类型和 LocalKeystore signer 已实现，但 staging genesis 只能提供零值占位。验证人需通过 `sff_rotateKeys` 获取新的完整 session key set 和对应 PoP，再调用 session 与 fast-finality pallet 的注册接口。
+2. **PoP 链下验证**：runtime `no_std` 不能做 BLS，故注册时不验 PoP；节点取 authority set 后链下 `pop_verify`，非法 key 仅告警、**保留其在集合中的位置**以维持 vote 的 `signer_index` 对齐。
+3. **仅 round 0，无 Skip / 轮次推进**：F2 只做 Prepare→Commit 两阶段；超时/重排仅驱动 Commit，不推进 round（设计 §4 的 round 推进留待 F3/F4）。
+4. **`activation_block` 未记账**：runtime 端未跟踪 session 激活块，填 `0`（仅影响集合标识 tuple，节点重导）。
+5. **端到端验证范围**：dev 两节点已跑通 vote→PrepareQC→CommitQC→observer 对照 GRANDPA（§11.1，0 验签失败 / 0 panic，GRANDPA 未受影响）。但**生产路径仍未验证**：`register_bls_key` 尚未在链上真实注册（dev 走的是未登记回落分支），且 `KeystoreSffSigner` 曾因 `Arc<dyn Keystore>` 未转发而全量失败（§11.2）。设计 §9.4 的完整影子流程需在带真实 BLS key 注册 + keystore signer 的两验证人链上复验。
+6. **启用条件**：每个当选验证人的当前 `NextKeys.sffb` 必须非零，并且 `pallet_fast_finality::BlsKeys` 中登记的公钥及 PoP 与该 session key 匹配；否则 authority set 不完整，`FastFinalityApi` 返回 `None`，SFF 静默 dormant（observer 仍运行但无 QC）。
+7. **observer 对照为单向告警**：SFF CommitQC 的区块不在 GRANDPA finalized 链上时记 `warn`（reorg 或 SFF 领先分支），不影响最终性——这是设计预期的安全旁路，非错误。
