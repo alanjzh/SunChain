@@ -131,6 +131,15 @@ pub struct SffStatus {
     /// Height of the currently served fast confirmation.
     pub fast_confirmed_height: Option<u32>,
     pub fast_confirmed_hash: Option<H256>,
+    /// Lowest height included in the contiguous fast-confirmed batch. Anything
+    /// below `grandpaFinalizedNumber + 1` is already GRANDPA-irreversible, so the
+    /// batch starts above it (clamped to the bounded history window).
+    pub fast_confirmed_base: Option<u32>,
+    /// Highest height `H` such that **every** height in
+    /// `[fast_confirmed_base, H]` has a CommitQC — the batch-confirmation
+    /// frontier (§13.3 P1-4). Differs from `fast_confirmed_height` (the max
+    /// completed height), which may sit above a hole.
+    pub fast_confirmed_frontier: Option<u32>,
     pub grandpa_finalized_number: u32,
     pub grandpa_finalized_hash: H256,
     /// Monotonic counter bumped on every publish/degrade/recover; consumers can
@@ -358,6 +367,26 @@ impl FastFinalityView {
             ),
             None => (None, None, None, sff_primitives::SFF_PROTOCOL_VERSION),
         };
+        // Batch-confirmation frontier (§13.3 P1-4): the highest height H such that
+        // every height in `[base, H]` has a CommitQC. The batch starts above the
+        // last GRANDPA-finalized height and is clamped to the bounded history so
+        // we never claim contiguity we cannot verify.
+        let (base, frontier) = if let Some(latest) = inner.latest.as_ref() {
+            let finalized = chain.finalized_number();
+            let base0 = finalized.saturating_add(1);
+            let window_base = latest.qc.height.saturating_sub(MAX_HISTORY as u32 - 1);
+            let base = base0.max(window_base);
+            let present: std::collections::HashSet<u32> =
+                inner.history.iter().map(|c| c.qc.height).collect();
+            let mut h = base;
+            while present.contains(&h) {
+                h += 1;
+            }
+            let frontier = if h > base { Some(h - 1) } else { None };
+            (Some(base), frontier)
+        } else {
+            (None, None)
+        };
         SffStatus {
             phase: "f3-fast-confirmed".to_string(),
             protocol_version: version,
@@ -369,6 +398,8 @@ impl FastFinalityView {
             last_conflict: inner.last_conflict.clone(),
             fast_confirmed_height: height,
             fast_confirmed_hash: hash,
+            fast_confirmed_base: base,
+            fast_confirmed_frontier: frontier,
             grandpa_finalized_number: chain.finalized_number(),
             grandpa_finalized_hash: chain.finalized_hash(),
             revision: inner.revision,
@@ -402,6 +433,22 @@ impl FastFinalityView {
     /// Monotonic revision counter used by the WS subscription.
     pub fn revision(&self) -> u64 {
         self.inner.lock().unwrap_or_else(|e| e.into_inner()).revision
+    }
+
+    /// Highest height with a fast-confirmed (CommitQC) certificate, or `None`
+    /// until the first one lands. This is the frontier the SFF view has already
+    /// served; everything *above* it (up to `best`) is the gap that still needs
+    /// its votes gathered. Healing is anchored to this value rather than to
+    /// `best - MAX_BACKLOG_HEIGHTS` so that a missed vote — even far below the
+    /// rolling backlog window — is still re-sent and the frontier keeps
+    /// advancing instead of freezing on a permanent hole.
+    pub fn fast_confirmed_height(&self) -> Option<u32> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .latest
+            .as_ref()
+            .map(|c| c.qc.height)
     }
 }
 
@@ -689,5 +736,38 @@ mod tests {
         assert!(view.certificate(&chain, MAX_HISTORY as u32 + 20).is_some());
         // Evicted from the bounded history, the head is unaffected.
         assert!(view.certificate(&chain, 1).is_none());
+    }
+
+    #[test]
+    fn batch_frontier_is_the_contiguous_prefix_above_finalized() {
+        let (mut chain, hashes) = MockChain::linear(20);
+        // GRANDPA has finalized up to #10; fast confirmation starts above it.
+        chain.finalized = hashes[10];
+        let view = FastFinalityView::new();
+        for n in 11..=18usize {
+            view.observe_commit_qc(qc(n as u32, hashes[n]), &chain);
+        }
+        let status = view.status(&chain);
+        assert_eq!(status.fast_confirmed_base, Some(11));
+        // 11..18 are contiguous, so the whole batch is fast-confirmed.
+        assert_eq!(status.fast_confirmed_frontier, Some(18));
+        assert_eq!(status.fast_confirmed_height, Some(18));
+    }
+
+    #[test]
+    fn batch_frontier_stops_at_a_hole() {
+        let (mut chain, hashes) = MockChain::linear(20);
+        chain.finalized = hashes[10];
+        let view = FastFinalityView::new();
+        // Contiguous 11..15, a hole at 16, then 17..18: the batch must stop at 15.
+        for n in [11usize, 12, 13, 14, 15, 17, 18] {
+            view.observe_commit_qc(qc(n as u32, hashes[n]), &chain);
+        }
+        let status = view.status(&chain);
+        assert_eq!(status.fast_confirmed_base, Some(11));
+        assert_eq!(status.fast_confirmed_frontier, Some(15));
+        // The max completed height still advances (18 exists), but it is not part
+        // of the contiguous fast-confirmed batch because 16 is missing.
+        assert_eq!(status.fast_confirmed_height, Some(18));
     }
 }

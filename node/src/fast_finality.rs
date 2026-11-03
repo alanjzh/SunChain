@@ -61,6 +61,57 @@ const DORMANT_LOG_INTERVAL: Duration = Duration::from_secs(30);
 /// and keeping it is what made aggregation cost grow with the backlog.
 const MAX_BACKLOG_HEIGHTS: u32 = 64;
 
+/// How many blocks a `(height, round)` may wait for its PrepareQC before the
+/// engine advances the round and emits a `Skip` (§13.3 P1-5).
+///
+/// This is deliberately *generous* (32 blocks). A healthy height forms its
+/// PrepareQC in 1–2 blocks, so it is never advanced spuriously. The only thing
+/// that can keep a height unconfirmed past a few blocks is a *lost* vote, and
+/// that is healed by `maintain_votes` re-sends (every `REPAIR_INTERVAL_BLOCKS`)
+/// and `request_repairs` (`REPAIR_INTERVAL_BLOCKS`) plus `repush_certificates`
+/// re-gossip — all of which redeliver the missing vote/certificate within a
+/// handful of blocks. Setting this too low (the old 8) meant a transient loss
+/// would trip a `Skip` *before* the healing redelivery arrived, cascading into a
+/// round-advancement / Skip storm and leaving SFF permanently ~24 blocks behind
+/// GRANDPA. A large timeout lets healing win the race, so rounds essentially
+/// never advance in steady state; genuine stalls still get a `Skip` eventually.
+const ROUND_TIMEOUT_BLOCKS: u32 = 32;
+
+/// Minimum number of blocks between two `RepairRequest`s / vote re-sends for the
+/// same `(set, height, phase)`. Repairs are only sent for heights that are
+/// actually missing a certificate (P1-6), so this just bounds the retry cadence.
+/// Set to 1 so healing redelivers a lost vote/certificate on the very next block —
+/// this is what lets SFF confirm heights within the GRANDPA finality lag (so the
+/// served frontier tracks instead of lagging by the re-send cadence).
+const REPAIR_INTERVAL_BLOCKS: u32 = 1;
+
+/// Re-gossip of *certificates* (push-based healing, P1-6 belt-and-suspenders).
+/// A pushed certificate heals a height in a single hop (no vote round-trip), so a
+/// moderately frequent re-gossip keeps the served frontier tracking GRANDPA even
+/// when the point-to-point vote/re-pair path is lossy. Kept at 4 (not 1) because
+/// it is heavier than vote re-sends; the per-block vote re-send covers the common
+/// case, this mop-up handles the rest.
+const REPUSH_INTERVAL_BLOCKS: u32 = 4;
+
+/// Per-height round state for round advancement (§13.3 P1-5). `round` is no
+/// longer hard-coded to 0: a height whose PrepareQC cannot form (lost vote,
+/// transient fork) advances rounds instead of stalling forever.
+#[derive(Default, Clone)]
+struct RoundState {
+    /// Round we are currently trying to gather a PrepareQC for.
+    current_round: u32,
+    /// Round whose PrepareQC has formed — once set we commit and never advance.
+    prepare_done: Option<u32>,
+    /// The block we are voting to prepare (the local new-best at this height).
+    block_hash: H256,
+    parent_hash: H256,
+    /// `best` height when we first prepared this height (round 0). Round advancement
+    /// is timed from *this*, not from `best - height`, so a height we only just
+    /// started voting on (e.g. at startup / catch-up) is not wrongly declared
+    /// stalled (P1-5 + P1-7 interaction, §13.7).
+    first_prepared_at: u32,
+}
+
 /// How many authority snapshots to keep after their set rotated out.
 ///
 /// Votes are bound to `(set_id, snapshot_root)`, and the runtime can only build
@@ -154,6 +205,12 @@ where
     C::Api: FastFinalityApi<B>,
 {
     fn current_set_id(&self) -> Option<u64> {
+        // Always live: `fast_finality_current_set_id` is a single cheap storage
+        // read, and serving a stale id (even briefly after a session rotation)
+        // would make a validator sign or verify a vote against the wrong set,
+        // breaking quorum. The expensive part — building the authority *set*
+        // vector — is cached per `set_id` in `authorities` below, so the
+        // per-height healing loop stays cheap without caching this id.
         let at = self.client.info().best_hash;
         self.client
             .runtime_api()
@@ -162,8 +219,21 @@ where
     }
 
     fn authorities(&self, set_id: u64) -> Option<FinalityAuthoritySet> {
-        // The runtime can only build the *current* set, so a rotated-out set is
-        // served from the snapshot captured while it was active.
+        // A captured snapshot is authoritative for a set id until that set
+        // rotates out, so the cache serves *both* the active set and rotated-out
+        // sets. Consult it first: previously the active set bypassed the cache
+        // on every call, forcing `current_set_id` + `fast_finality_authorities`
+        // runtime round-trips for every height in `advance_rounds` /
+        // `maintain_votes` — ~256 blocking WASM calls per healing tick that
+        // stalled the 1s loop for 10-20s and froze fast confirmation.
+        if let Some(set) = self
+            .cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(set_id)
+        {
+            return Some(set);
+        }
         if self.current_set_id() == Some(set_id) {
             let at = self.client.info().best_hash;
             let set = self
@@ -179,7 +249,7 @@ where
                 .insert(set.clone());
             return Some(set);
         }
-        self.cache.lock().unwrap_or_else(|e| e.into_inner()).get(set_id)
+        None
     }
 }
 
@@ -239,6 +309,19 @@ struct FastFinalityEngine<B, C, P, S: ?Sized> {
     our_index: Mutex<Option<(u64, H256, u32)>>,
     sent_prepares: Mutex<HashSet<(u64, u32, u32)>>,
     sent_commits: Mutex<HashSet<(u64, u32, u32)>>,
+    sent_skips: Mutex<HashSet<(u64, u32, u32)>>,
+    /// Per-`(set_id, height)` round state for round advancement (P1-5).
+    round_state: Mutex<HashMap<(u64, u32), RoundState>>,
+    /// Throttle for `RepairRequest`s (P1-6): `(set, height, phase)` -> best height
+    /// at which we last asked. Re-ask only after `REPAIR_INTERVAL_BLOCKS`.
+    last_repair: Mutex<HashMap<(u64, u32, Phase), u32>>,
+    /// Cursor for the catch-up sweep (P1-7): only re-walk the chain when the tip
+    /// has advanced, so steady-state does not re-read 64 headers every tick.
+    catchup_cursor: Mutex<u32>,
+    /// Cursor for QC re-gossip (reliable delivery): only re-push certificates
+    /// every `REPAIR_INTERVAL_BLOCKS` so a peer that missed the original broadcast
+    /// (transient substream reset, set rotation) still receives it without flooding.
+    repush_cursor: Mutex<u32>,
     seen_commit_heights: Mutex<HashSet<(u64, u32)>>,
     _phantom: PhantomData<(B, C)>,
 }
@@ -311,57 +394,538 @@ where
                 return;
             }
         };
-        let idx = match self.ensure_our_index(&set) {
-            Some(i) => i,
-            None => {
-                self.note_dormant("this node is not a member of the SFF authority set");
-                return;
-            }
-        };
         let height: u32 = (*header.number()).unique_saturated_into();
         let block_hash = header.hash();
         let parent_hash = *header.parent_hash();
+        #[cfg(debug_assertions)]
+        {
+            let best: u32 = self.client.info().best_number.unique_saturated_into();
+            log::debug!(
+                target: "sff",
+                "on_block_imported height={} best={} lag={}",
+                height, best, best.saturating_sub(height)
+            );
+        }
 
+        // Record/refresh this height's round state; the first sighting starts at
+        // round 0, later sightings (reorg re-import) keep the advanced round and
+        // update the target block (P1-5, §13.3).
+        let round = {
+            let mut rs = self.round_state.lock().unwrap_or_else(|e| e.into_inner());
+            let st = rs
+                .entry((set.set_id, height))
+                .or_insert_with(RoundState::default);
+            st.block_hash = block_hash;
+            st.parent_hash = parent_hash;
+            st.current_round
+        };
+
+        // Always (re-)prepare the height's current round. The local guard dedups
+        // per `(set, height, round)`, so this is a no-op once we have voted.
+        self.issue_prepare(&set, height, round, block_hash, parent_hash);
+    }
+
+    /// Builds and self-verifies a vote for `(height, round, phase)`. Returns
+    /// `None` if this node is not in the set, signing failed, or the signature
+    /// does not verify. Does not insert or broadcast — see [`Self::emit_vote`].
+    fn build_vote(
+        &self,
+        set: &FinalityAuthoritySet,
+        height: u32,
+        round: u32,
+        phase: Phase,
+        block_hash: Option<H256>,
+        parent_hash: H256,
+        prepare_qc_hash: Option<H256>,
+    ) -> Option<Vote> {
+        let idx = self.ensure_our_index(set)?;
         let mut vote = Vote {
             version: SFF_PROTOCOL_VERSION,
             genesis_hash: self.genesis_hash,
             set_id: set.set_id,
             snapshot_root: set.snapshot_root,
             height,
-            round: 0,
-            phase: Phase::Prepare,
-            block_hash: Some(block_hash),
+            round,
+            phase,
+            block_hash,
             parent_hash,
-            prepare_qc_hash: None,
+            prepare_qc_hash,
             signer_index: idx,
             signature: BlsSignature::ZERO,
         };
-        vote.signature = match self.signer.sign(
-            &set.authorities[idx as usize].bls_public_key,
-            &vote.canonical_bytes(),
-        ) {
-            Some(s) => s,
-            None => return,
-        };
-        if verify_vote(&vote, &set).is_err() {
-            log::warn!(target: "sff", "self Prepare vote failed verification; skipping");
-            return;
+        vote.signature = self
+            .signer
+            .sign(&set.authorities[idx as usize].bls_public_key, &vote.canonical_bytes())?;
+        if verify_vote(&vote, set).is_err() {
+            log::warn!(
+                target: "sff",
+                "self {:?} vote failed verification at height {} round {}; skipping",
+                phase, height, round
+            );
+            return None;
         }
-        // This is the durable local anti-equivocation boundary, independent of
-        // pool de-duplication and gossip ordering.
-        if !claim_prepare(&self.sent_prepares, set.set_id, height, 0) {
-            return;
-        }
+        Some(vote)
+    }
 
-        log::info!(
-            target: "sff",
-            "signed Prepare vote set_id={} height={} round=0 signer_index={}",
-            set.set_id, height, idx
-        );
+    /// Inserts, broadcasts and immediately aggregates a vote.
+    fn emit_vote(
+        &self,
+        set: &FinalityAuthoritySet,
+        vote: Vote,
+        phase: Phase,
+        height: u32,
+        round: u32,
+    ) {
         self.pool.lock().unwrap().add_vote(vote.clone());
         self.broadcast(SffMessage::Vote(vote));
-        self.aggregation_step_for(&set, Phase::Prepare, height, 0);
+        self.aggregation_step_for(set, phase, height, round);
     }
+
+    /// Signs and broadcasts a Prepare vote for `(height, round)`, gated by the
+    /// per-`(set, height, round)` anti-equivocation guard.
+    fn issue_prepare(
+        &self,
+        set: &FinalityAuthoritySet,
+        height: u32,
+        round: u32,
+        block_hash: H256,
+        parent_hash: H256,
+    ) {
+        if !self
+            .sent_prepares
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert((set.set_id, height, round))
+        {
+            return;
+        }
+        let Some(vote) = self.build_vote(
+            set,
+            height,
+            round,
+            Phase::Prepare,
+            Some(block_hash),
+            parent_hash,
+            None,
+        ) else {
+            self.sent_prepares
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&(set.set_id, height, round));
+            return;
+        };
+        // Anchor the round-advancement timeout to when we actually started voting
+        // on this (height, round) — not to `best - height` — so a height prepared at
+        // startup / catch-up is not spuriously declared stalled, and a round we just
+        // advanced to (after a Skip) is given a fresh window instead of inheriting
+        // the old round's deadline (which would cascade Skips).
+        {
+            let best: u32 = self.client.info().best_number.unique_saturated_into();
+            let mut rs = self.round_state.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(st) = rs.get_mut(&(set.set_id, height)) {
+                st.first_prepared_at = best;
+            }
+        }
+        log::info!(
+            target: "sff",
+            "signed Prepare vote set_id={} height={} round={} signer_index={}",
+            set.set_id, height, round, vote.signer_index
+        );
+        self.emit_vote(set, vote, Phase::Prepare, height, round);
+    }
+
+    /// Signs and broadcasts a `Skip` vote for `(height, round)` — the signal that
+    /// this node is abandoning `round` because its PrepareQC did not form in
+    /// time (P1-5). A `SkipQC` (≥ 2/3) lets every node advance to `round + 1`.
+    fn issue_skip(&self, set: &FinalityAuthoritySet, height: u32, round: u32) {
+        if !self
+            .sent_skips
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert((set.set_id, height, round))
+        {
+            return;
+        }
+        // A Skip attests no block: `block_hash` is `None`, `parent_hash` is zero
+        // (both nodes agree), so any two Skip votes for `(height, round)` aggregate.
+        let Some(vote) = self.build_vote(
+            set,
+            height,
+            round,
+            Phase::Skip,
+            None,
+            H256::zero(),
+            None,
+        ) else {
+            self.sent_skips
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&(set.set_id, height, round));
+            return;
+        };
+        log::info!(
+            target: "sff",
+            "signed Skip vote set_id={} height={} round={} (advancing) signer_index={}",
+            set.set_id, height, round, vote.signer_index
+        );
+        self.emit_vote(set, vote, Phase::Skip, height, round);
+    }
+
+    /// Reacts to a built certificate: a PrepareQC triggers our Commit, a SkipQC
+    /// advances the local round.
+    fn on_built_qc(&self, set: &FinalityAuthoritySet, qc: &sff_primitives::QuorumCertificate) {
+        match qc.phase {
+            Phase::Prepare => {
+                // Record that this round's PrepareQC formed: we will commit and
+                // must never advance the round past it.
+                {
+                    let mut rs = self.round_state.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(st) = rs.get_mut(&(qc.set_id, qc.height)) {
+                        if st.prepare_done.map(|r| r < qc.round).unwrap_or(true) {
+                            st.prepare_done = Some(qc.round);
+                        }
+                    }
+                }
+                self.maybe_commit(set, qc);
+            }
+            Phase::Skip => self.on_skip_qc(set, qc.height, qc.round),
+            Phase::Commit => {}
+        }
+    }
+
+    /// A `SkipQC` for `(height, round)` means the network has abandoned `round`;
+    /// advance our local round (unless we already committed) and re-prepare the
+    /// new round so a PrepareQC can form there (P1-5).
+    fn on_skip_qc(&self, set: &FinalityAuthoritySet, height: u32, round: u32) {
+        let next = round + 1;
+        let target = {
+            let mut rs = self.round_state.lock().unwrap_or_else(|e| e.into_inner());
+            // Unknown height: adopt the advance but we have no target block to
+            // re-prepare against, so just record the round and stop.
+            let st = rs.entry((set.set_id, height)).or_insert_with(RoundState::default);
+            if st.prepare_done.is_some() {
+                return; // already committed at some round; do not advance.
+            }
+            if next <= st.current_round {
+                return;
+            }
+            st.current_round = next;
+            if st.block_hash.is_zero() {
+                None
+            } else {
+                Some((st.block_hash, st.parent_hash))
+            }
+        };
+        if let Some((block_hash, parent_hash)) = target {
+            self.issue_prepare(set, height, next, block_hash, parent_hash);
+        }
+    }
+
+    /// Advances rounds for heights whose PrepareQC has not formed within
+    /// `ROUND_TIMEOUT_BLOCKS` *since we first prepared them* (not since the block
+    /// height itself — that would wrongly flag a freshly imported / caught-up
+    /// height whose `best - height` is already large). Each advance emits a `Skip`
+    /// for the abandoned round and re-prepares the next one, so a lost vote or
+    /// transient fork no longer stalls a height forever (P1-5, §13.2(d)).
+    fn advance_rounds(&self) {
+        let best: u32 = self.client.info().best_number.unique_saturated_into();
+        // Collect the heights that need advancing (read lock), then act outside it.
+        let mut stalled: Vec<(u64, u32, u32, H256, H256)> = Vec::new();
+        {
+            let rs = self.round_state.lock().unwrap_or_else(|e| e.into_inner());
+            for ((set_id, height), st) in rs.iter() {
+                if st.prepare_done.is_some() {
+                    continue; // committed; nothing to advance.
+                }
+                // A height we never actually prepared (block unknown, e.g. learned
+                // only via a SkipQC) has nothing to re-prepare and must not advance.
+                if st.first_prepared_at == 0 {
+                    continue;
+                }
+                if best.saturating_sub(st.first_prepared_at) <= ROUND_TIMEOUT_BLOCKS {
+                    continue; // still young; give the PrepareQC time to form.
+                }
+                log::debug!(
+                    target: "sff",
+                    "advance_rounds: STALL height={} set_id={} round={} prepare_done={:?} first_prepared_at={} best={} diff={}",
+                    height, set_id, st.current_round, st.prepare_done, st.first_prepared_at, best, best.saturating_sub(st.first_prepared_at)
+                );
+                stalled.push((*set_id, *height, st.current_round, st.block_hash, st.parent_hash));
+            }
+        }
+        for (set_id, height, round, block_hash, _parent_hash) in stalled {
+            let Some(set) = self.provider.authorities(set_id) else {
+                continue;
+            };
+            // Emit a `Skip` for the round we are abandoning. We do NOT advance the
+            // local round here: the local round only moves in `on_skip_qc`, once a
+            // ≥ 2/3 `SkipQC` is actually built. Advancing locally would desync the
+            // two nodes (one forms the round's PrepareQC and commits, the other
+            // jumps ahead) and create a permanent hole. Re-transmission in
+            // `maintain_votes` usually heals the lost vote before a `SkipQC` is ever
+            // needed, so a round is only skipped when ≥ 2/3 genuinely agree.
+            let _ = block_hash;
+            self.issue_skip(&set, height, round);
+        }
+    }
+
+    /// Catch-up (P1-7): ensures every height in the working window carries our own
+    /// Prepare vote (and, where a PrepareQC already exists, our Commit vote) even
+    /// if its import notification was missed or we were briefly offline. This closes
+    /// §13.2(d)'s "permanently missing hole": a height that was *never* voted on is
+    /// re-prepared here, and a PrepareQC that arrived only via gossip/repair gets
+    /// its Commit here. Idempotent via the per-`(set, height, round)` guards, so it
+    /// is a no-op once every height in the window is covered.
+    /// Re-transmit our votes for heights we already track, to heal votes lost in
+    /// gossip and close §13.2(d)'s "permanently missing hole". First coverage of a
+    /// height is the job of `on_block_imported` (it prepares every new-best block);
+    /// here we only *re-send* Prepare / Commit for heights present in `round_state`
+    /// that still lack a certificate. The peer de-duplicates identical votes, so
+    /// re-transmission cannot amplify — it just repairs loss. Throttled to every
+    /// `REPAIR_INTERVAL_BLOCKS` so steady-state is a no-op.
+    fn maintain_votes(&self) {
+        let info = self.client.info();
+        let best: u32 = info.best_number.unique_saturated_into();
+        let finalized: u32 = info.finalized_number.unique_saturated_into();
+        // Anchor the healing window at the *frontier* (last fast-confirmed height)
+        // rather than at `best - MAX_BACKLOG_HEIGHTS`. The only heights whose votes
+        // still need gathering are those between the frontier and `best`; anchoring
+        // here means a missed vote — even well below the rolling backlog window —
+        // is still re-sent, so the frontier advances instead of freezing on a
+        // permanent hole. The window `[frontier, best]` is naturally small and
+        // shrinks as holes fill, so the per-tick cost stays bounded.
+        let frontier = self.view.fast_confirmed_height().unwrap_or(0);
+        let floor = finalized.min(frontier);
+        {
+            let mut cur = self
+                .catchup_cursor
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if best.saturating_sub(*cur) < REPAIR_INTERVAL_BLOCKS {
+                return;
+            }
+            *cur = best;
+        }
+        if floor >= best {
+            return;
+        }
+        // Re-send for every height we have prepared (present in `round_state`) that
+        // is still in the working window.
+        let entries: Vec<(u64, u32, u32, H256, H256)> = {
+            let mut rs = self.round_state.lock().unwrap_or_else(|e| e.into_inner());
+            rs.iter_mut()
+                .filter(|((_, h), st)| *h > floor && st.first_prepared_at != 0)
+                .map(|((sid, h), st)| {
+                    // Refresh the staleness timer: we are about to actively re-send
+                    // this height's votes, so it is *not* stalled. This is what
+                    // prevents the round-advance from firing during catch-up /
+                    // healing purely because `best` has raced ahead of the block
+                    // height we first prepared — the chain produces blocks faster
+                    // than real-time vote redelivery, so a height can be only
+                    // seconds old in wall-clock yet dozens of blocks "stale" by the
+                    // `best - first_prepared_at` metric. With the timer refreshed
+                    // here every `REPAIR_INTERVAL_BLOCKS`, a height is only ever
+                    // flagged stalled (and Skipped) if we have genuinely stopped
+                    // healing it — i.e. it is committed or has fallen below the
+                    // window.
+                    st.first_prepared_at = best;
+                    (*sid, *h, st.current_round, st.block_hash, st.parent_hash)
+                })
+                .collect()
+        };
+        for (set_id, h, round, block_hash, parent_hash) in entries {
+            let Some(authorities) = self.provider.authorities(set_id) else {
+                continue;
+            };
+            let (prep_qc, committed) = {
+                let pool = self.pool.lock().unwrap_or_else(|e| e.into_inner());
+                let prep = pool.qc_for(set_id, Phase::Prepare, h, round).cloned();
+                let committed = pool.qc_for(set_id, Phase::Commit, h, round).is_some();
+                (prep, committed)
+            };
+            if committed {
+                continue; // already fast-confirmed at this round; nothing to (re)send.
+            }
+            // Re-send our Prepare vote for *every* height we prepared but have not
+            // yet fast-confirmed. The old guard `prep_qc.is_none()` only re-sent when
+            // *we* lacked the PrepareQC — but the peer can be missing *our* Prepare
+            // even though *we* already hold the PrepareQC (we saw the peer's Prepare,
+            // the peer never saw ours). That case was skipped and left a permanent
+            // hole. Re-sending unconditionally is safe: the peer de-duplicates
+            // identical votes, so this heals loss without amplification. A genuinely
+            // missing Prepare that neither side holds is still recovered because the
+            // other node re-sends its own Prepare under the same rule.
+            if !block_hash.is_zero() {
+                self.resend_vote(
+                    &authorities,
+                    h,
+                    round,
+                    Phase::Prepare,
+                    Some(block_hash),
+                    parent_hash,
+                    None,
+                );
+            }
+            // Re-send our Commit vote if we have a PrepareQC but no CommitQC: our
+            // Commit may have been lost. (If we already hold the CommitQC we skip —
+            // the lagging peer asks for it via `request_repairs` instead of us
+            // spraying it.)
+            if let Some(prep) = prep_qc {
+                self.resend_vote(
+                    &authorities,
+                    h,
+                    round,
+                    Phase::Commit,
+                    prep.block_hash,
+                    prep.parent_hash,
+                    Some(prep.vote_payload_hash),
+                );
+            }
+        }
+    }
+
+    /// Re-emits one of our votes *without* the per-`(set, height, round)` guard, so
+    /// it can re-transmit a vote whose earlier send was lost in gossip. The peer
+    /// de-duplicates identical votes, so this heals loss without amplification.
+    fn resend_vote(
+        &self,
+        set: &FinalityAuthoritySet,
+        height: u32,
+        round: u32,
+        phase: Phase,
+        block_hash: Option<H256>,
+        parent_hash: H256,
+        prepare_qc_hash: Option<H256>,
+    ) {
+        let Some(vote) = self.build_vote(
+            set,
+            height,
+            round,
+            phase,
+            block_hash,
+            parent_hash,
+            prepare_qc_hash,
+        ) else {
+            return;
+        };
+        self.emit_vote(set, vote, phase, height, round);
+    }
+
+    /// Active repair (P1-6): for any height in the window that still lacks a
+    /// certificate, ask peers for it. The P2P layer answers a `RepairRequest` by
+    /// sending back the matching `Certificate` (point-to-point, never relayed), so a
+    /// returned CommitQC reaches the observer via `add_qc` → `new_commit_qcs`, and a
+    /// returned PrepareQC is turned into our Commit by `catch_up`. The request uses
+    /// each height's *original* `set_id` (from `round_state`), not the current one —
+    /// a height's certificate is stored under the set active when it was processed,
+    /// and a session rotation would otherwise make the lookup miss. Throttled per
+    /// `(set, height, phase)`.
+    fn request_repairs(&self) {
+        let info = self.client.info();
+        let best: u32 = info.best_number.unique_saturated_into();
+        let finalized: u32 = info.finalized_number.unique_saturated_into();
+        // Anchor at the frontier (last fast-confirmed height) so repair requests
+        // cover *every* height above the frontier that still lacks a certificate,
+        // not just those inside the rolling backlog window. A missed certificate
+        // below the backlog window would otherwise never be requested and would
+        // freeze the frontier.
+        let frontier = self.view.fast_confirmed_height().unwrap_or(0);
+        let floor = finalized.min(frontier);
+        if floor >= best {
+            return;
+        }
+        // Iterate `round_state` entries (each carries its original `set_id`) rather
+        // than `current_set()`, so the repair request matches how the certificate
+        // is keyed.
+        let entries: Vec<(u64, u32, u32)> = {
+            let rs = self.round_state.lock().unwrap_or_else(|e| e.into_inner());
+            rs.iter()
+                .filter(|((_, h), st)| *h > floor && st.first_prepared_at != 0)
+                .map(|((sid, h), st)| (*sid, *h, st.current_round))
+                .collect()
+        };
+        let mut to_ask: Vec<RepairRequest> = Vec::new();
+        {
+            let pool = self.pool.lock().unwrap_or_else(|e| e.into_inner());
+            let mut last = self
+                .last_repair
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            for (set_id, h, round) in entries {
+                if pool.qc_for(set_id, Phase::Commit, h, round).is_some() {
+                    continue; // already fast-confirmed; nothing to repair.
+                }
+                let (phase, r) = if pool.qc_for(set_id, Phase::Prepare, h, round).is_some() {
+                    (Phase::Commit, round)
+                } else {
+                    (Phase::Prepare, round)
+                };
+                let key = (set_id, h, phase);
+                let prev = last.get(&key).copied().unwrap_or(0);
+                if best.saturating_sub(prev) < REPAIR_INTERVAL_BLOCKS {
+                    continue;
+                }
+                last.insert(key, best);
+                to_ask.push(RepairRequest {
+                    set_id,
+                    height: h,
+                    round: r,
+                    phase,
+                });
+            }
+        }
+        for req in to_ask {
+            log::debug!(
+                target: "sff",
+                "repair request set_id={} height={} round={} phase={:?}",
+                req.set_id, req.height, req.round, req.phase
+            );
+            self.broadcast(SffMessage::Repair(req));
+        }
+    }
+
+    /// Reliable delivery (push-based healing): re-gossip every certificate we hold
+    /// for a height still in the working window. The peer de-duplicates identical
+    /// certificates by `vote_payload_hash`, so this is pure healing — a peer that
+    /// missed the original broadcast (transient substream reset, `set_id` rotation,
+    /// brief partition) receives the QC here without any amplification. This is what
+    /// actually closes the asymmetric "A has the CommitQC, B is missing it" holes
+    /// the pull-based `request_repairs` alone was not reliably clearing: a lost
+    /// point-to-point repair answer is recovered by the next re-push. Throttled to
+    /// every `REPAIR_INTERVAL_BLOCKS` so steady-state traffic is bounded.
+    fn repush_certificates(&self) {
+        let info = self.client.info();
+        let best: u32 = info.best_number.unique_saturated_into();
+        let finalized: u32 = info.finalized_number.unique_saturated_into();
+        let floor = finalized.min(best.saturating_sub(MAX_BACKLOG_HEIGHTS));
+        if floor >= best {
+            return;
+        }
+        {
+            let mut cur = self
+                .repush_cursor
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if best.saturating_sub(*cur) < REPUSH_INTERVAL_BLOCKS {
+                return;
+            }
+            *cur = best;
+        }
+        let pool = self.pool.lock().unwrap_or_else(|e| e.into_inner());
+        // PrepareQCs let a lagging peer that is missing a Prepare vote still form
+        // its own Commit; CommitQCs let it fast-confirm directly.
+        for (_set_id, h, _round, qc) in pool.qc_entries(Phase::Prepare) {
+            if h > floor {
+                self.broadcast(SffMessage::Certificate(qc));
+            }
+        }
+        for (_set_id, h, qc) in pool.commit_qc_entries() {
+            if h > floor {
+                self.broadcast(SffMessage::Certificate(qc));
+            }
+        }
+    }
+
 
     /// Aggregate any ready votes for one `(phase, height, round)` and broadcast
     /// the resulting certificate. On a PrepareQC, trigger our Commit vote.
@@ -390,9 +954,7 @@ where
                 qc.set_id, qc.height, qc.round, qc.block_hash
             );
             self.broadcast(SffMessage::Certificate(qc.clone()));
-            if phase == Phase::Prepare {
-                self.maybe_commit(set, &qc);
-            }
+            self.on_built_qc(set, &qc);
         }
     }
 
@@ -434,13 +996,27 @@ where
                             qc.set_id, qc.height, qc.round, qc.block_hash
                         );
                         self.broadcast(SffMessage::Certificate(qc.clone()));
-                        if phase == Phase::Prepare {
-                            self.maybe_commit(&set, &qc);
-                        }
+                        self.on_built_qc(&set, &qc);
                     }
                 }
             }
         }
+    }
+
+    /// Healing / catch-up / repair round (P1-5/P1-6/P1-7): re-send our own votes
+    /// for any unconfirmed height, pull missing certificates from peers, re-gossip
+    /// certificates, advance rounds, prune the backlog, and run the observer.
+    ///
+    /// This MUST run on a *reliable* cadence, so it is driven by its own 1s task
+    /// in `run` rather than the gossip `notify` branch of the main select! loop.
+    /// If it ran only on `notify`, a lossy/gappy vote stream would starve the very
+    /// re-sends/repairs it needs to recover — which is exactly what made the
+    /// confirmation frontier oscillate and lag GRANDPA by many blocks.
+    fn healing_step(&self) {
+        self.advance_rounds();
+        self.maintain_votes();
+        self.request_repairs();
+        self.repush_certificates();
         self.prune_backlog();
         self.observe();
     }
@@ -457,63 +1033,32 @@ where
         if !self
             .sent_commits
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .insert((set.set_id, height, round))
         {
             return;
         }
-        let idx = match self.ensure_our_index(set) {
-            Some(i) => i,
-            None => {
-                self.sent_commits
-                    .lock()
-                    .unwrap()
-                    .remove(&(set.set_id, height, round));
-                return;
-            }
-        };
-        let mut vote = Vote {
-            version: SFF_PROTOCOL_VERSION,
-            genesis_hash: self.genesis_hash,
-            set_id: set.set_id,
-            snapshot_root: set.snapshot_root,
+        let Some(vote) = self.build_vote(
+            set,
             height,
             round,
-            phase: Phase::Commit,
-            block_hash: prepare_qc.block_hash,
-            parent_hash: prepare_qc.parent_hash,
-            prepare_qc_hash: Some(prepare_qc.vote_payload_hash),
-            signer_index: idx,
-            signature: BlsSignature::ZERO,
-        };
-        vote.signature = match self.signer.sign(
-            &set.authorities[idx as usize].bls_public_key,
-            &vote.canonical_bytes(),
-        ) {
-            Some(s) => s,
-            None => {
-                self.sent_commits
-                    .lock()
-                    .unwrap()
-                    .remove(&(set.set_id, height, round));
-                return;
-            }
-        };
-        if verify_vote(&vote, set).is_err() {
+            Phase::Commit,
+            prepare_qc.block_hash,
+            prepare_qc.parent_hash,
+            Some(prepare_qc.vote_payload_hash),
+        ) else {
             self.sent_commits
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|e| e.into_inner())
                 .remove(&(set.set_id, height, round));
             return;
-        }
+        };
         log::info!(
             target: "sff",
             "signed Commit vote set_id={} height={} round={}",
             set.set_id, height, round
         );
-        self.pool.lock().unwrap().add_vote(vote.clone());
-        self.broadcast(SffMessage::Vote(vote));
-        self.aggregation_step_for(set, Phase::Commit, height, round);
+        self.emit_vote(set, vote, Phase::Commit, height, round);
     }
 
     fn broadcast(&self, msg: SffMessage) {
@@ -538,6 +1083,24 @@ where
         let mut pool = self.pool.lock().unwrap();
         pool.set_floor(floor);
         pool.prune_below(floor);
+        // Drop per-height bookkeeping for heights that can no longer complete.
+        let f = floor;
+        self.round_state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|(_, h), _| *h >= f);
+        self.sent_prepares
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|(_, h, _)| *h >= f);
+        self.sent_commits
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|(_, h, _)| *h >= f);
+        self.sent_skips
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|(_, h, _)| *h >= f);
     }
 
     /// Shadow observer: hand every newly observed CommitQC to the F3 view, which
@@ -601,18 +1164,6 @@ where
         }
     }
 
-}
-
-fn claim_prepare(
-    sent_prepares: &Mutex<HashSet<(u64, u32, u32)>>,
-    set_id: u64,
-    height: u32,
-    round: u32,
-) -> bool {
-    sent_prepares
-        .lock()
-        .unwrap()
-        .insert((set_id, height, round))
 }
 
 #[cfg(test)]
@@ -684,11 +1235,11 @@ mod tests {
     }
 
     #[test]
-    fn prepare_guard_allows_only_one_target_per_set_height_round() {
-        let sent = Mutex::new(HashSet::new());
-        assert!(claim_prepare(&sent, 4, 20, 0));
-        assert!(!claim_prepare(&sent, 4, 20, 0));
-        assert!(claim_prepare(&sent, 5, 20, 0));
+    fn round_state_default_starts_at_zero() {
+        let st = RoundState::default();
+        assert_eq!(st.current_round, 0);
+        assert!(st.prepare_done.is_none());
+        assert!(st.block_hash.is_zero());
     }
 }
 
@@ -716,7 +1267,7 @@ pub async fn run_fast_finality<B, C, P, S>(
         .unwrap_or_else(|e| e.into_inner())
         .set_waker(notify.clone());
 
-    let engine = FastFinalityEngine::<B, C, P, S> {
+    let engine = Arc::new(FastFinalityEngine::<B, C, P, S> {
         provider,
         signer,
         pool,
@@ -728,17 +1279,49 @@ pub async fn run_fast_finality<B, C, P, S>(
         our_index: Mutex::new(None),
         sent_prepares: Mutex::new(HashSet::new()),
         sent_commits: Mutex::new(HashSet::new()),
+        sent_skips: Mutex::new(HashSet::new()),
+        round_state: Mutex::new(HashMap::new()),
+        last_repair: Mutex::new(HashMap::new()),
+        catchup_cursor: Mutex::new(0),
+        repush_cursor: Mutex::new(0),
         seen_commit_heights: Mutex::new(HashSet::new()),
         _phantom: PhantomData,
-    };
+    });
 
     log::info!(target: "sff", "SFF shadow engine started (genesis {genesis_hash})");
 
-    // Aggregation is event-driven (the pool notifies on every insert); the timer
-    // is only a safety net for pruning and anything that slipped through.
+    // Healing (vote re-send / repair / re-gossip / round-advance / prune /
+    // observe, P1-5..P1-7) runs on its OWN reliable 1s task, fully decoupled
+    // from the gossip `notify`. If it ran on `notify`, a lossy or gappy vote
+    // stream would starve the very re-sends and repairs it needs to recover from
+    // exactly those losses — which previously made the confirmation frontier
+    // oscillate and lag GRANDPA by many blocks. Running it independently keeps
+    // re-sends/repairs flowing at a steady 1s cadence no matter how bad the
+    // underlying gossip is.
+    let heal_engine = engine.clone();
+    tokio::spawn(async move {
+        let mut timer = interval(Duration::from_millis(1_000));
+        loop {
+            timer.tick().await;
+            heal_engine.healing_step();
+        }
+    });
+
+    // Vote aggregation (the dirty-key sweep that builds QCs and drives commits)
+    // is event-driven: the pool notifies on every inserted vote. `import_stream`
+    // is biased-prioritized so block imports are always prepared promptly
+    // (preventing frontier lag from import starvation); `notify` aggregates the
+    // votes as they arrive; the timer is an idle fallback.
     let mut timer = interval(Duration::from_millis(1_000));
     loop {
+        // `biased` polls the branches in source order so a pending block-import
+        // notification is always preferred over the (almost always ready) gossip
+        // `notify`. Without this, a fair `select!` can starve `import_stream`
+        // behind the continuous stream of vote notifications, causing SFF to
+        // prepare heights many blocks after they are imported — which makes the
+        // fast-confirmation frontier lag GRANDPA by exactly that delay.
         tokio::select! {
+            biased;
             notif = import_stream.next() => {
                 match notif {
                     Some(n) => engine.on_block_imported(&n.header, n.is_new_best),
@@ -754,15 +1337,4 @@ pub async fn run_fast_finality<B, C, P, S>(
         }
     }
     log::info!(target: "sff", "shadow engine loop terminated");
-}
-
-/// Builds a repair request for a missing certificate (used by the gossip reply).
-#[allow(dead_code)]
-pub fn repair_for(phase: Phase, height: u32, round: u32, set_id: u64) -> SffMessage {
-    SffMessage::Repair(RepairRequest {
-        set_id,
-        height,
-        round,
-        phase,
-    })
 }

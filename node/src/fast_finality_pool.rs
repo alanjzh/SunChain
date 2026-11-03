@@ -243,6 +243,19 @@ impl FastFinalityPool {
         self.commit_qc.get(&(set_id, height))
     }
 
+    /// All `(set_id, height, round, qc)` for the given phase, for re-gossip / repair
+    /// enumeration. Bounded by the pool itself, so the caller cannot grow it.
+    pub fn qc_entries(
+        &self,
+        phase: Phase,
+    ) -> Vec<(u64, u32, u32, QuorumCertificate)> {
+        self.qcs
+            .iter()
+            .filter(|((_, p, _, _), _)| *p == phase)
+            .map(|((set_id, _, height, round), v)| (*set_id, *height, *round, v.clone()))
+            .collect()
+    }
+
     /// All `(phase, height, round)` keys that currently hold at least one vote.
     pub fn votes_keys(&self) -> Vec<(u64, Phase, u32, u32)> {
         self.votes.keys().copied().collect()

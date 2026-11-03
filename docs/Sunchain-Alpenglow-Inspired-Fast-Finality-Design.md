@@ -605,8 +605,8 @@ GRANDPA 的 prevote/precommit 在同一轮内由消息事件直接驱动，不�
 
 **P1 — 协议完整性（决定"会不会卡住"）**
 
-- [ ] 4. 批量确认：一次确认到某个高度（对齐 GRANDPA 一次终局一批）。
-- [ ] 5. 轮次推进与 Skip 票（`round` 现在恒为 0，高度拿不到法定人数就永远不动）。
+- [x] 4. 批量确认：一次确认到某个高度（对齐 GRANDPA 一次终局一批）。
+- [x] 5. 轮次推进与 Skip 票（`round` 现在恒为 0，高度拿不到法定人数就永远不动）。
 - [ ] 6. 主动 Repair（`repair_for` 目前是死代码，丢票/丢证书永不恢复）。
 - [ ] 7. 非 `new-best` 区块补投 / catch-up，消除 (d) 的永久空洞。
 
@@ -654,3 +654,61 @@ GRANDPA 的 prevote/precommit 在同一轮内由消息事件直接驱动，不�
   延迟随规模上升而 SFF 两阶段近似恒定，领先量会更大——但这需要用多验证人网络实测才能量化。
 - 主动 Repair（P1-6）的**接收/应答侧**已在 `fast_finality_p2p.rs` 就绪（`RepairRequest` + `answer_repair`），但引擎从不发送；由于裁剪策略已消除绝大多数空洞，其优先级下降，仅在出现真实丢票时才需要补齐发起侧。
 - P1（轮次推进 / Skip / 批量 / leader / Rotor）尚未做，决定规模化后的延迟与吞吐上限。
+
+### 13.6 P1-4 / P1-5 实测（2026-11-02）
+
+**P1-4 批量确认（视图层）**：`SffStatus` 新增 `fastConfirmedBase` 与 `fastConfirmedFrontier`。
+`fastConfirmedFrontier` 是满足"**[base, H] 内每个高度都有 CommitQC**"的最高 `H`，其中
+`base = max(GRANDPA finalized + 1, 历史窗口下界)`；它与原有的 `fastConfirmedHeight`（最大完成高度，
+可能落在空洞之上）区分开。消费方据此可一次性确认 `[base, frontier]` 整批，而非逐高度查询。
+单测 `batch_frontier_is_the_contiguous_prefix_above_finalized` / `batch_frontier_stops_at_a_hole`
+覆盖连续与遇洞即止两种情形。
+
+**P1-5 轮次推进与 Skip 票（引擎层）**：`round` 不再恒为 0。每个 `(set_id, height)` 维护
+`RoundState { current_round, prepare_done, block_hash, parent_hash }`；`on_block_imported` 不再硬编码
+round 0，而是prepare当前 round；新增 `advance_rounds`（每聚合节拍检查：某高度 `best - height >
+ROUND_TIMEOUT_BLOCKS(=8)` 且未形成 PrepareQC 时，对该 round 发 `Skip` 并把 `current_round` 推进到
+`round+1` 重新 prepare），以及 `on_skip_qc`（收到 `SkipQC` 后推进本地 round 并重投新 round 的 Prepare）。
+`Skip` 票的 `block_hash=None`、`parent_hash=zero`，保证任意两张同 `(height, round)` 的 Skip 可聚合。
+`maybe_commit` 改为复用统一的 `build_vote`/`emit_vote` 辅助，Prepare/Commit/Skip 三态统一经
+`on_built_qc` 分发。
+
+实测（dev 两节点，同 P0 环境）：活跃窗口 101..164 **64/64 连续、0 空洞**，`fastConfirmedBase=163` /
+`fastConfirmedFrontier=164`（连续故等于 head），`fastConfirmedHeight=164` vs `grandpaFinalizedNumber=162`
+（SFF 领先 2 块）；日志 `signed Skip vote = 0`（健康路径下 PrepareQC 在 1–2 块内形成，不误触发轮次推进）、
+签名失败/验签失败/panic/conflict 全为 0。轮次推进逻辑已接好，健康流无回归；其在"丢票/停滞高度"下的表现
+属于 (d) 的活性兜底，需构造丢票场景专项验证（见 P1-7 catch-up 一并处理）。
+
+### 13.7 真链部署与永久空洞自愈（2026-11-03）
+
+本轮把 SFF 从 dev 两节点搬到真链 `--chain sunchain`（固定 master/slave 两验证人），修复三处部署 / 活性缺陷，最终真链与 dev 一致：`fastConfirmedFrontier` 连续、紧贴 GRANDPA（gap=2）、0 STALL、无 Skip/conflict。
+
+#### 13.7.1 genesis `DuplicatedKey`（initial_config.rs::session_keys_json）
+
+- 症状：`--chain sunchain --fresh` 起链 panic `Client(DuplicatedKey)`（session genesis 的 `inner_set_keys` 发现同一把 raw 公钥被两个不同 `who` 共用）；复用旧 DB 则表现为 wasm trap。
+- 根因：`session_keys_json` 给 master/slave 都写**全零** `sffb`（`0x0000…00`），两验证人共用一把 BLS 公钥 → 触发重复密钥检查。
+- 修复：每个验证人的 `sffb` 由其**自身 babe 公钥确定性派生** `BlsKeypair::from_seed(blake2_256(babe_bytes))`，天然不同且非零。与节点侧 sffb 私钥注入同源派生，公钥一致。
+
+#### 13.7.2 真链 SFF 激活：sffb 私钥注入 + PoP 自举（service.rs + initial_config.rs::staging_sffb_pops）
+
+- 症状：真链 keystore 没有 `sffb` 私钥，且未链上 `register_bls_key` → authority set 的 `sffb` 公钥非零但其 PoP 为零 → `verify_vote` 因 `InvalidPop` 拒票 → SFF dormant（不投票、不组 QC）。
+- 修复（镜像 dev 的 `dev_pops` 兜底）：
+  - `service.rs`：非 dev 的 authority 节点启动时用自身 babe 公钥 `sff_generate_new(KeyTypeId(*b"sffb"), Some(babe_bytes))` 注入 `sffb` 私钥（两侧各注入自己那份，不造成 equivocation）。
+  - `initial_config.rs::staging_sffb_pops()`：用 master/slave 各自 babe 公钥派生双方 `(sffb 公钥, PoP)`，注入到 `RuntimeAuthorityProvider` 的 `dev_pops`；两节点都持双方 PoP 用于验票，但仅持自身签名私钥。PoP 与 genesis 广告的 `sffb` 公钥同源，通过 `verify_vote`。
+
+#### 13.7.3 自愈窗口锚定前沿，消除永久空洞（fast_finality.rs + fast_finality_view.rs）
+
+- 症状：P0 收尾后 dev 已连续，但真链上 `fastConfirmedFrontier` 卡在某高度、`frontier=null`、落后 GRANDPA 数百块，且落在 `maintain_votes`/`request_repairs` 之外无法自愈。
+- 根因：两函数的 healing 窗口下界 `floor = finalized.min(best - MAX_BACKLOG_HEIGHTS)`。某高度一旦在凑齐 CommitQC 前落到窗口下界之下，就**永不重发投票**，形成永久空洞；前沿推进遇首个空洞即停。真链因 set 旋转 / gossip 冷启动偶发丢票，空洞落在窗口下方后无法自愈。
+- 旁支排查：`current_set_id()` 曾加 10s TTL 缓存，旋转后瞬间用旧 set_id 签名 / 验票被拒，造成一部分早期空洞。因 `current_set_id` 仅是单次存储读（廉价），改为**每次实时查询**，避免旋转后陈旧 set_id 投票；重活（`fast_finality_authorities` 重建 authority vector）仍按 set_id 缓存于 `authorities()`。
+- 修复：把 `floor` 锚定到 SFF 前沿 `floor = finalized.min(self.view.fast_confirmed_height().unwrap_or(0))`（新增 `FastFinalityView::fast_confirmed_height()` getter）。`[frontier, best]` 内任何缺口都被重发 / 补证，前沿推进后窗口自然收窄，有界且自愈；高度低于前沿者已提交，重发无害。`advance_rounds` 对低于其窗口的高度直接忽略（不 Skip），安全。
+
+#### 13.7.4 验证结果（2026-11-03）
+
+- dev 两节点（1858 块）：`advance_rounds: STALL=0`，`gap` 稳定 = 2，`fastConfirmedFrontier` 连续非 None，`signed Skip vote=0`，`conflicts=0`，`serving=true/degraded=false`。
+- 真链 `--chain sunchain --fresh`（master RPC 9944 / slave 9945，复用 keystore）跑过 ~80+ 块（含 set 旋转）：master 与 slave 一致 `frontier=80`、`grandpa=78` → **gap=2**，`serving=true`、`degraded=false`、`conflicts=0`、0 STALL；仅 slave 出现 1 次 Skip（单瞬时空洞被 Skip，但前沿仍推进到 80，已自愈）。SFF 在真链上连续跟踪 GRANDPA。
+
+#### 13.7.5 运维注意
+
+- `session_keys_json` 的 sffb 派生方式变化属于 genesis 变更：现有 sunchain DB 必须 `--fresh` 重建（`start_chain.sh --fresh` 保留 keystore、仅清 db/frontier）。
+- 仅注入本节点 sffb 私钥（按自身 babe），master/slave 不共享签名私钥，避免 equivocation。

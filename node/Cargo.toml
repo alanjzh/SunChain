@@ -72,6 +72,7 @@ sunchain-runtime.workspace = true
 sff-primitives = { workspace = true, features = ["std"] }
 sff-crypto = { workspace = true, default-features = false }
 sff-verifier = { workspace = true, default-features = false }
+hex = { workspace = true }
 sunlead-primitives = { workspace = true, features = ["std"] }
 sunlead-verifier = { path = "../crates/sunlead-verifier", default-features = false }
 sunlead-schedule = { path = "../crates/sunlead-schedule", default-features = false }

@@ -234,6 +234,22 @@ where
         });
         if let Some(seed) = dev_seed {
             inject_dev_session_keys(&keystore_container.keystore(), &seed);
+        } else if config.role.is_authority() {
+            // Staging (`--chain sunchain`): the genesis derives each validator's
+            // `sffb` BLS key from that validator's own babe session key (see
+            // `chain_spec::initial_config::session_keys_json`). Re-derive the
+            // matching secret here from the very same babe public key so the node
+            // can sign SFF votes for its own authority. Only the local node's
+            // babe key is used, so a node never holds the peer's `sffb` secret
+            // (which would cause equivocation).
+            let keystore = keystore_container.keystore();
+            let babe_keys = keystore.sr25519_public_keys(KeyTypeId(*b"babe"));
+            if let Some(babe_pub) = babe_keys.first() {
+                let _ = keystore.sff_generate_new(
+                    KeyTypeId(*b"sffb"),
+                    Some(babe_pub.as_ref()),
+                );
+            }
         }
     }
 
@@ -1058,9 +1074,18 @@ pub async fn new_full_base<N: NetworkBackend<Block, <Block as sp_runtime::traits
             crate::fast_finality_pool::FastFinalityPool::new(),
         ));
         // DEV-ONLY: real proofs-of-possession for the dev validators' BLS keys.
+        // DEV-ONLY: real proofs-of-possession for the dev validators' BLS keys.
         // Derived from the same dev seeds used by the genesis session keys, so the
-        // keys and PoPs match. Empty on real deployments, where the PoP comes from
-        // the on-chain `register_bls_key`.
+        // keys and PoPs match.
+        //
+        // For non-dev chains (e.g. staging `--chain sunchain`) the PoP comes from
+        // the on-chain `register_bls_key` in production, but our fixed 2-validator
+        // staging spec has no such registration step — so we supply the PoPs
+        // off-chain here (mirroring dev). `staging_sffb_pops` derives them from
+        // the same babe keys the genesis used, so they match the advertised `sffb`
+        // public keys and `verify_vote` accepts every validator's vote. Each entry
+        // covers *both* validators so every node can verify every vote; each node
+        // still holds only its own `sffb` signing secret.
         let sff_dev_pops: Vec<(
             sff_primitives::BlsPublicKey,
             sff_primitives::BlsSignature,
@@ -1073,7 +1098,7 @@ pub async fn new_full_base<N: NetworkBackend<Block, <Block as sp_runtime::traits
                     Some((keypair.public(), sff_crypto::pop_sign(&keypair)))
                 })
                 .collect(),
-            None => Default::default(),
+            None => crate::chain_spec::initial_config::staging_sffb_pops(),
         };
         let sff_provider = std::sync::Arc::new(crate::fast_finality::RuntimeAuthorityProvider::<
             Block,

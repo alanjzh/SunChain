@@ -12,6 +12,9 @@ use sp_core::{
 use sp_runtime::Perbill;
 use sp_staking::StakerStatus;
 use sp_tracing::{debug, info, warn};
+use sp_core::hashing::blake2_256;
+use sff_crypto::BlsKeypair;
+use hex;
 use sunchain_runtime::BABE_GENESIS_EPOCH_CONFIG;
 use sunlead_primitives::SunLeadId;
 
@@ -213,6 +216,35 @@ fn configure_accounts(
     (initial_authorities, endowed_accounts, stakers)
 }
 
+/// The (BLS public key, proof-of-possession) pairs for the two staging
+/// validators, each derived from that validator's own babe session key.
+///
+/// This mirrors `session_keys_json`'s `sffb` derivation (so the PoP we supply
+/// matches the public key the genesis advertised) and the dev `sff_dev_pops`
+/// trick: *both* entries are returned so that *every* node can verify *every*
+/// validator's SFF vote, while each node still holds only its own `sffb` *signing*
+/// secret (injected into its keystore at startup). Without these PoPs the runtime
+/// serves an all-zero PoP and `verify_vote` rejects every vote, leaving SFF
+/// dormant.
+pub fn staging_sffb_pops() -> Vec<(sff_primitives::BlsPublicKey, sff_primitives::BlsSignature)> {
+	use sp_core::crypto::Ss58Codec as _;
+	// Master / slave babe (sr25519) session keys — same values used in
+	// `configure_accounts_for_staging_sunchain`.
+	let babe_keys = [
+		"5HbuZEuQ8My5Q6ZRPupFa1cwCp456ZtxaxQHhQLqRxKAdZFx",
+		"5Dha6qr9sbURXuwqmVe3tKgPDXMrAciVrrNmG3eosg211Wyk",
+	];
+	babe_keys
+		.iter()
+		.filter_map(|s| {
+			let babe = core_sr25519::Public::from_ss58check(s).ok()?;
+			let seed = blake2_256(babe.as_ref());
+			let kp = BlsKeypair::from_seed(&seed);
+			Some((kp.public(), sff_crypto::pop_sign(&kp)))
+		})
+		.collect()
+}
+
 /// Creates the session keys as defined by the runtime.
 fn session_keys_json(
     grandpa: GrandpaId,
@@ -221,13 +253,23 @@ fn session_keys_json(
     authority_discovery: AuthorityDiscoveryId,
     sunl: SunLeadId,
 ) -> serde_json::Value {
+    // The `sffb` (BLS) shadow key is derived deterministically from *this
+    // authority's own babe session key*: distinct babe keys (master vs slave)
+    // yield distinct `sffb` keys, so the session genesis no longer trips
+    // `DuplicatedKey` (which it did when both validators were handed the
+    // all-zero `sffb`). The node re-derives the matching *secret* at startup
+    // from the very same babe public key (see `service.rs`), so each validator
+    // can sign SFF votes for its own authority without either node ever holding
+    // the other's `sffb` secret (which would cause equivocation).
+    let babe_bytes = babe.as_ref();
+    let sff_pub = BlsKeypair::from_seed(&blake2_256(babe_bytes)).public();
     serde_json::json!({
         "authority_discovery": authority_discovery,
         "babe": babe,
         "grandpa": grandpa,
         "im_online": im_online,
         "sunl": sunl,
-        "sffb": format!("0x{}", "00".repeat(96)),
+        "sffb": format!("0x{}", hex::encode(sff_pub.as_bytes())),
     })
 }
 

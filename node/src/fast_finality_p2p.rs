@@ -91,7 +91,16 @@ pub const MAX_NOTIFICATION_BYTES: usize = 16 * 1024;
 pub const RATE_LIMIT_WINDOW_BLOCKS: u32 = 10;
 
 /// Messages one peer may have accepted per window — a bound, not a generosity.
-pub const MAX_MESSAGES_PER_WINDOW: u32 = 200;
+///
+/// Set generously: this is a *trusted* validator-to-validator protocol, and the
+/// real backstop against abuse is [`MAX_BYTES_PER_WINDOW`] (4 MiB / window).
+/// The original 200 was far too low — during recovery after a transient
+/// substream stall every height that lost a vote re-sends it, and the healing
+/// burst (tens of messages per 10-block window, plus certificate re-gossip and
+/// repair answers) routinely exceeded 200, so the rate limiter *dropped the
+/// healing traffic itself*, leaving permanent holes. 1024 keeps the bound
+/// meaningful while letting legitimate recovery complete.
+pub const MAX_MESSAGES_PER_WINDOW: u32 = 1024;
 
 /// Bytes one peer may push per window.
 pub const MAX_BYTES_PER_WINDOW: u64 = 4 * 1024 * 1024;
@@ -230,11 +239,16 @@ pub async fn run_sff_gossip<B, C, P>(
 
         match which {
             Which::Local(Some(bytes)) => {
-                // Local submit: dedup by semantic key, then relay once.
-                let key = local_seen_key(&bytes);
-                if key.map(|k| seen.insert(k)).unwrap_or(true) {
-                    relay(&mut service, &peers, &bytes).await;
+                // Local submit from our own engine. Always relay: re-transmissions
+                // (re-sent votes from `maintain_votes` / `request_repairs`) are how we
+                // heal votes the peer lost in gossip, so they MUST reach the peer. We
+                // still record the key in `seen` so that a peer's relay of this same
+                // message back to us is dropped (loop prevention) — but we never let
+                // `seen` suppress our own re-transmission.
+                if let Some(k) = local_seen_key(&bytes) {
+                    seen.insert(k);
                 }
+                relay(&mut service, &peers, &bytes).await;
                 continue;
             }
             Which::Local(None) => continue,
@@ -273,34 +287,51 @@ pub async fn run_sff_gossip<B, C, P>(
                     }
 
                     if !limits.allow(&peer_bytes) {
+                        log::debug!(target: "sff", "gossip: dropped peer message (rate limited)");
                         continue;
                     }
 
                     // A repair request is answered back to the asker only.
                     if let SffMessage::Repair(req) = &msg {
                         if let Some(qc) = answer_repair(&pool, req) {
+                            log::debug!(
+                                target: "sff",
+                                "gossip: repair req set_id={} height={} round={} phase={:?} answered=true",
+                                req.set_id, req.height, req.round, req.phase
+                            );
                             let _ = service.send_async_notification(&peer, qc).await;
+                        } else {
+                            log::debug!(
+                                target: "sff",
+                                "gossip: repair req set_id={} height={} round={} phase={:?} answered=false",
+                                req.set_id, req.height, req.round, req.phase
+                            );
                         }
                         continue;
                     }
 
                     let key = seen_key(&msg);
-                    if seen.set.contains(&key) {
-                        continue; // already seen, never relayed twice
+                    let already_seen = seen.set.contains(&key);
+                    if !already_seen {
+                        if !validate(&provider, client.info().genesis_hash, &msg) {
+                            // Invalid (bad signature / set / unknown set) — drop.
+                            log::debug!(target: "sff", "gossip: dropped invalid/unknown-set message");
+                            continue;
+                        }
+                        // Invalid traffic cannot reserve a valid message's dedup key.
+                        seen.insert(key);
                     }
 
-                    if !validate(&provider, client.info().genesis_hash, &msg) {
-                        // Invalid (bad signature / set / unknown set) — drop.
-                        continue;
-                    }
-
-                    // Invalid traffic cannot reserve a valid message's dedup key.
-                    seen.insert(key);
-
-                    // Accept into the local pool so the engine can aggregate/observe.
+                    // Always accept into the local pool. `add_vote`/`add_qc` de-duplicate
+                    // internally, so this is safe; and a re-transmission that we already
+                    // "saw" may still be needed if the original was received but its pool
+                    // insert was lost — so we must not drop it on the `seen` check. Only
+                    // the *relay* is suppressed when already seen (loop prevention).
                     accept_into_pool(&pool, &msg);
 
-                    relay(&mut service, &peers, &notification).await;
+                    if !already_seen {
+                        relay(&mut service, &peers, &notification).await;
+                    }
                 }
                 _ => {}
             },
@@ -327,7 +358,22 @@ fn seen_key(msg: &SffMessage) -> SeenKey {
             qc.phase as u8,
             qc.vote_payload_hash.0,
         ),
-        SffMessage::Repair(_) => SeenKey::Cert(0, 0, 0, 255, [0u8; 32]),
+        // A repair request must be de-duplicated by its *actual* target, not a
+        // constant — the old code keyed every repair to the same `Cert(0,0,0,255,..)`
+        // which meant the first repair was accepted and every later one was silently
+        // dropped by the dedup, so the pull-based repair (P1-6) could never heal more
+        // than one hole. Keying on the request fields lets each distinct request be
+        // answered once while still collapsing identical re-requests. The trailing
+        // 32 bytes are left zero: a repair and a certificate for the same
+        // `(set, height, round, phase)` share a key, which is correct — once you have
+        // the certificate you do not need to re-answer the matching repair.
+        SffMessage::Repair(req) => SeenKey::Cert(
+            req.set_id,
+            req.height,
+            req.round,
+            req.phase as u8,
+            [0u8; 32],
+        ),
     }
 }
 
