@@ -345,7 +345,40 @@ pub fn verify_qc(qc: &QuorumCertificate, set: &FinalityAuthoritySet) -> Result<(
 /// All votes must carry the *same* canonical message (version, genesis, set,
 /// snapshot, height, round, phase, block, parent, prepare_qc). Duplicate
 /// signers, a mismatched message or a bad individual signature are rejected.
-pub fn aggregate_votes(votes: &[Vote], set: &FinalityAuthoritySet) -> Result<QuorumCertificate, SffError> {
+/// Aggregates `votes` into a `>2/3` certificate, verifying every constituent
+/// vote's signature (and PoP) via [`verify_vote`].
+///
+/// See [`aggregate_votes_cached`] for the verification-memoizing variant used by
+/// the SFF pool, which avoids re-verifying votes already validated on a previous
+/// aggregation attempt.
+pub fn aggregate_votes(
+	votes: &[Vote],
+	set: &FinalityAuthoritySet,
+) -> Result<QuorumCertificate, SffError> {
+	// No pre-verified votes: verify every one (matches the historical behaviour
+	// relied on by fixtures/tests).
+	aggregate_votes_cached(votes, set, &[])
+}
+
+/// Aggregates `votes` into a `>2/3` certificate, but skips BLS verification for
+/// any vote flagged in `pre_verified` (index-aligned with `votes`).
+///
+/// This is the verification-memoizing variant used by the SFF pool. The pool
+/// verifies each stored, immutable vote exactly once (via [`verify_vote`]) and
+/// records the result; on later aggregation attempts over the same votes it
+/// passes `pre_verified` so the (expensive) pairing is not re-run. Every other
+/// invariant — message equality, no duplicate signer, bitmap bounds, stake
+/// overflow — is enforced exactly as in [`aggregate_votes`].
+///
+/// Safety: a vote's verification result is memoized under its identity
+/// `(set_id, phase, height, round, signer_index)`. The pool stores at most one
+/// vote per such identity (later duplicates are dropped before insertion), so
+/// the cached vote bytes are immutable and the memo is sound.
+pub fn aggregate_votes_cached(
+	votes: &[Vote],
+	set: &FinalityAuthoritySet,
+	pre_verified: &[bool],
+) -> Result<QuorumCertificate, SffError> {
 	if votes.is_empty() {
 		return Err(SffError::EmptyCertificate);
 	}
@@ -354,7 +387,7 @@ pub fn aggregate_votes(votes: &[Vote], set: &FinalityAuthoritySet) -> Result<Quo
 	let mut bm = SignerBitmap::with_capacity(set.authorities.len());
 	let mut signed_stake = 0u128;
 
-	for v in votes {
+	for (i, v) in votes.iter().enumerate() {
 		if v.version != first.version
 			|| v.genesis_hash != first.genesis_hash
 			|| v.set_id != first.set_id
@@ -372,7 +405,9 @@ pub fn aggregate_votes(votes: &[Vote], set: &FinalityAuthoritySet) -> Result<Quo
 		if bm.get(idx) {
 			return Err(SffError::DuplicateSigner);
 		}
-		verify_vote(v, set)?;
+		if pre_verified.get(i) != Some(&true) {
+			verify_vote(v, set)?;
+		}
 		bm.set(idx);
 		let st = set.authorities.get(idx).ok_or(SffError::BitmapIndexOutOfRange)?.stake;
 		signed_stake = signed_stake.checked_add(st).ok_or(SffError::StakeOverflow)?;

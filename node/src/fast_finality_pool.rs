@@ -9,7 +9,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use sff_crypto::{aggregate_votes, LockTracker};
+use sff_crypto::{aggregate_votes_cached, verify_vote, LockTracker};
 use sff_primitives::{exceeds_two_thirds, FinalityAuthoritySet, Phase, QuorumCertificate, Vote};
 use sp_core::H256;
 use tokio::sync::Notify;
@@ -34,6 +34,13 @@ pub struct FastFinalityPool {
     locks: HashMap<u64, LockTracker>,
     /// `(phase, height, round, signer_index) -> ()` to de-dupe votes.
     seen_vote: HashMap<(u64, Phase, u32, u32, u32), ()>,
+    /// `(set_id, phase, height, round, signer_index) -> ()`: votes whose BLS
+    /// signature+PoP already passed `verify_vote`. `try_build_qc` verifies a
+    /// vote once and memoizes it here, so `aggregate_votes_cached` skips
+    /// re-verification on subsequent attempts. The stored votes are immutable
+    /// (duplicates are dropped before insertion), so the memo is sound. Bounded
+    /// by `prune_below`.
+    verified: HashSet<(u64, Phase, u32, u32, u32)>,
     /// Total votes, for the cap.
     total_votes: usize,
     /// Keys whose vote set changed since the last aggregation attempt.
@@ -86,6 +93,7 @@ impl FastFinalityPool {
             .retain(|(_, height, _, _, _), _| *height >= min_height);
         self.commit_qc.retain(|(_, height), _| *height >= min_height);
         self.seen_vote.retain(|(_, _, height, _, _), _| *height >= min_height);
+        self.verified.retain(|(_, _, height, _, _)| *height >= min_height);
         self.dirty.retain(|(_, _, height, _)| *height >= min_height);
         self.total_votes = self.votes.values().map(|m| m.len()).sum();
     }
@@ -196,8 +204,12 @@ impl FastFinalityPool {
                 .entry((qc.set_id, qc.height))
                 .or_insert_with(|| qc.clone());
             self.new_commit_qcs.push(qc.clone());
-            self.notify();
         }
+        // Wake the engine on every accepted certificate (pipeline overlap, §8.2):
+        // a *received* Prepare/Skip QC must drive our Commit vote / round advance
+        // immediately, not wait for the aggregation timer. Locally built QCs call
+        // `on_built_qc` directly; this is the backstop for QCs learned only via gossip.
+        self.notify();
         self.qcs.insert(key, qc);
         if key.1 == Phase::Prepare {
             let pending_keys: Vec<_> = self
@@ -293,7 +305,27 @@ impl FastFinalityPool {
             Some(m) if !m.is_empty() => m.values().cloned().collect(),
             _ => return None,
         };
-        let qc = aggregate_votes(&votes, set).ok()?;
+        // Verify each vote at most once. A vote already in `self.verified` is
+        // skipped; a freshly verified one is recorded so later aggregation
+        // attempts over the same stored votes do not re-run the BLS pairing.
+        let pre_verified: Vec<bool> = votes
+            .iter()
+            .map(|v| {
+                let key = (v.set_id, v.phase, v.height, v.round, v.signer_index);
+                if self.verified.contains(&key) {
+                    true
+                } else {
+                    match verify_vote(v, set) {
+                        Ok(()) => {
+                            self.verified.insert(key);
+                            true
+                        }
+                        Err(_) => false,
+                    }
+                }
+            })
+            .collect();
+        let qc = aggregate_votes_cached(&votes, set, &pre_verified).ok()?;
         if !exceeds_two_thirds(qc.signed_stake, set.total_stake) {
             return None;
         }

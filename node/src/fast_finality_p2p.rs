@@ -5,9 +5,9 @@
 //! every message is cheaply size-checked, de-duplicated and rate-limited before
 //! it is decoded or validated, and only *accepted* (validated) messages are
 //! relayed. Vote *signatures* are NOT checked on receipt — the pool's
-//! `aggregate_votes` re-verifies every constituent vote when a QC is built, so the
-//! only check here is structural sanity (plus a full BLS check for certificates).
-//! Invalid traffic is never amplified.
+//! `aggregate_votes_cached` verifies each constituent vote exactly once (memoized
+//! in the pool) when a QC is built, so the only check here is structural sanity
+//! (plus a full BLS check for certificates). Invalid traffic is never amplified.
 //!
 //! F2 is **shadow**: nothing here changes fork choice, runtime state or user
 //! finality. The pool is only read by the observer, which logs/meters diffs.
@@ -53,13 +53,20 @@ pub enum SffMessage {
     Ack([u8; 32]),
 }
 
-const DELIVERY_RETRY_BASE: std::time::Duration = std::time::Duration::from_millis(500);
-const DELIVERY_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(8);
+// Item 3 (compress retransmission delay): the first retransmit of an un-acked
+// message fires after `DELIVERY_RETRY_BASE`. For co-located/low-RTT validator
+// sets a 500ms floor let a single dropped vote stall "collect 3/4" by half a
+// second; 150ms recovers ~3x faster while still being a sane floor for real
+// cross-region links. Backoff still caps at `DELIVERY_RETRY_MAX`.
+const DELIVERY_RETRY_BASE: std::time::Duration = std::time::Duration::from_millis(150);
+const DELIVERY_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(4);
 const MAX_PENDING_PER_PEER: usize = 1024;
 const MAX_ACK_HISTORY_PER_PEER: usize = 8192;
 const MAX_CONCURRENT_BLS_VALIDATIONS: usize = 4;
 const MAX_PENDING_VALIDATIONS: usize = 256;
-const MAX_RETRIES_PER_TICK: usize = 4;
+// Item 3: allow more concurrent retransmits per 100ms tick so a healing burst
+// (many lost votes at once) is re-sent promptly instead of serialised 4-at-a-time.
+const MAX_RETRIES_PER_TICK: usize = 16;
 
 struct PendingDelivery {
     bytes: Vec<u8>,
@@ -565,10 +572,11 @@ fn seen_key(msg: &SffMessage) -> SeenKey {
 /// Cheap structural sanity check for a gossip message — NO BLS.
 ///
 /// Vote *signatures* and PoPs are intentionally NOT checked here. The pool's
-/// `aggregate_votes` re-verifies every constituent vote (PoP + signature) when a QC
-/// is built, so re-checking each vote on every receipt is pure waste and — under four
-/// co-located validators contending for CPU — was the dominant BLS cost that stalled
-/// the gossip loop. We only reject grossly malformed messages (unknown set,
+/// `aggregate_votes_cached` verifies each constituent vote exactly once (PoP +
+/// signature) and memoizes the result when a QC is built, so re-checking each vote
+/// on every receipt is pure waste and — under four co-located validators contending
+/// for CPU — was the dominant BLS cost that stalled the gossip loop. We only reject
+/// grossly malformed messages (unknown set,
 /// out-of-range signer index, wrong genesis) so the pool and relay stay clean.
 ///
 /// Certificates (QCs) ARE verified here: they are a single aggregate signature (one

@@ -329,6 +329,10 @@ struct FastFinalityEngine<B, C, P, S: ?Sized> {
     /// (transient substream reset, set rotation) still receives it without flooding.
     repush_cursor: Mutex<u32>,
     seen_commit_heights: Mutex<HashSet<(u64, u32)>>,
+    /// QCs whose `on_built_qc` reaction has already run (whether built locally or
+    /// learned via gossip), so each QC drives our Commit vote / round advance
+    /// exactly once (pipeline overlap, §8.2). Pruned by height in `prune_backlog`.
+    reacted_qcs: Mutex<HashSet<(u64, Phase, u32, u32)>>,
     _phantom: PhantomData<(B, C)>,
 }
 
@@ -595,6 +599,17 @@ where
     /// Reacts to a built certificate: a PrepareQC triggers our Commit, a SkipQC
     /// advances the local round.
     fn on_built_qc(&self, set: &FinalityAuthoritySet, qc: &sff_primitives::QuorumCertificate) {
+        // React to each QC exactly once, whether it was built locally or learned
+        // via gossip (pipeline overlap, §8.2). The dedup key is the QC identity.
+        let key = (qc.set_id, qc.phase, qc.height, qc.round);
+        if !self
+            .reacted_qcs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key)
+        {
+            return;
+        }
         match qc.phase {
             Phase::Prepare => {
                 // Record that this round's PrepareQC formed: we will commit and
@@ -641,6 +656,33 @@ where
         };
         if let Some((block_hash, parent_hash)) = target {
             self.issue_prepare(set, height, next, block_hash, parent_hash);
+        }
+    }
+
+    /// Reacts to certificates that arrived via gossip rather than being built
+    /// locally, so a *received* PrepareQC / SkipQC drives our Commit vote / round
+    /// advance exactly like a locally built one (pipeline overlap, §8.2). The
+    /// engine already calls `on_built_qc` the moment *it* builds a QC; this is the
+    /// symmetric backstop for QCs it only learned about through certificate gossip.
+    /// `reacted_qcs` guarantees each QC is processed once regardless of path.
+    fn react_to_received_qcs(&self) {
+        for phase in [Phase::Prepare, Phase::Skip] {
+            let entries = self.pool.lock().unwrap_or_else(|e| e.into_inner()).qc_entries(phase);
+            for (set_id, height, round, qc) in entries {
+                let key = (set_id, phase, height, round);
+                if self
+                    .reacted_qcs
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .contains(&key)
+                {
+                    continue;
+                }
+                let Some(set) = self.provider.authorities(set_id) else {
+                    continue;
+                };
+                self.on_built_qc(&set, &qc);
+            }
         }
     }
 
@@ -1016,6 +1058,10 @@ where
     /// Sweep all pending votes, form any certificates, drive Commit votes, then
     /// run the observer over newly observed CommitQCs.
     fn aggregation_step(&self) {
+        // Drive our Commit vote / round advance for any Prepare/Skip QC learned via
+        // gossip since the last sweep (pipeline overlap, §8.2). Locally built QCs
+        // already called `on_built_qc` directly; `reacted_qcs` dedups the two paths.
+        self.react_to_received_qcs();
         // Only keys whose vote set actually changed since the last attempt.
         // Aggregating every pending height on every tick costs one BLS
         // verification per vote, so its cost grows with the backlog — which
@@ -1149,6 +1195,10 @@ where
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .retain(|(_, h), _| *h >= f);
+        self.reacted_qcs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|(_, _, h, _)| *h >= f);
         self.sent_prepares
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -1345,6 +1395,7 @@ pub async fn run_fast_finality<B, C, P, S>(
         catchup_cursor: Mutex::new(0),
         repush_cursor: Mutex::new(0),
         seen_commit_heights: Mutex::new(HashSet::new()),
+        reacted_qcs: Mutex::new(HashSet::new()),
         _phantom: PhantomData,
     });
 
