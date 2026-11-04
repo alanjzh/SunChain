@@ -607,8 +607,8 @@ GRANDPA 的 prevote/precommit 在同一轮内由消息事件直接驱动，不�
 
 - [x] 4. 批量确认：一次确认到某个高度（对齐 GRANDPA 一次终局一批）。
 - [x] 5. 轮次推进与 Skip 票（`round` 现在恒为 0，高度拿不到法定人数就永远不动）。
-- [ ] 6. 主动 Repair（`repair_for` 目前是死代码，丢票/丢证书永不恢复）。
-- [ ] 7. 非 `new-best` 区块补投 / catch-up，消除 (d) 的永久空洞。
+- [x] 6. 主动 Repair：原 `repair_for` 死代码已移除（§13.2(d) 描述的历史状态）；现由 §13.7.3 的 `maintain_votes`（重发未达 2/3 的 Prepare/Commit 票）+ `request_repairs`（向 peer 发 `RepairRequest` 补证书）实现，两函数均会**主动发送**。
+- [x] 7. 非 `new-best` 区块补投 / catch-up，消除 (d) 的永久空洞：由 §13.7.3 把 healing 窗口下界锚定到 `fastConfirmedHeight`（前沿）实现——`[frontier, best]` 内任何缺口都被重发 / 补证，前沿推进后窗口自然收窄；`advance_rounds` 对低于其窗口的高度直接忽略（不 Skip），安全。
 
 **P2 — 规模化（验证人数量上百后才必需）**
 
@@ -696,6 +696,8 @@ ROUND_TIMEOUT_BLOCKS(=8)` 且未形成 PrepareQC 时，对该 round 发 `Skip` �
   - `service.rs`：非 dev 的 authority 节点启动时用自身 babe 公钥 `sff_generate_new(KeyTypeId(*b"sffb"), Some(babe_bytes))` 注入 `sffb` 私钥（两侧各注入自己那份，不造成 equivocation）。
   - `initial_config.rs::staging_sffb_pops()`：用 master/slave 各自 babe 公钥派生双方 `(sffb 公钥, PoP)`，注入到 `RuntimeAuthorityProvider` 的 `dev_pops`；两节点都持双方 PoP 用于验票，但仅持自身签名私钥。PoP 与 genesis 广告的 `sffb` 公钥同源，通过 `verify_vote`。
 
+> ⚠️ **临时偏差（生产前须移除）**：本 off-chain `staging_sffb_pops` 注入**不是**设计要求的生产密钥注册路径。设计（§11.1 已知偏离 5、§13.3 item 11）要求验证人通过 `sff_rotateKeys` 生成真实 `sffb` 并向 `pallet_fast_finality::register_bls_key` 提交公钥 + PoP（链下 `pop_verify`）。固定 2 验证人的 staging 为快速打通 SFF 才走此捷径；真实多验证人部署必须改用 `register_bls_key`，否则密钥自举不可扩展且不安全。
+
 #### 13.7.3 自愈窗口锚定前沿，消除永久空洞（fast_finality.rs + fast_finality_view.rs）
 
 - 症状：P0 收尾后 dev 已连续，但真链上 `fastConfirmedFrontier` 卡在某高度、`frontier=null`、落后 GRANDPA 数百块，且落在 `maintain_votes`/`request_repairs` 之外无法自愈。
@@ -712,3 +714,10 @@ ROUND_TIMEOUT_BLOCKS(=8)` 且未形成 PrepareQC 时，对该 round 发 `Skip` �
 
 - `session_keys_json` 的 sffb 派生方式变化属于 genesis 变更：现有 sunchain DB 必须 `--fresh` 重建（`start_chain.sh --fresh` 保留 keystore、仅清 db/frontier）。
 - 仅注入本节点 sffb 私钥（按自身 babe），master/slave 不共享签名私钥，避免 equivocation。
+
+### 13.7.6 实现侧补记（早前会话，归档）
+
+以下两处修复已在代码中落地，此前未写入设计文档，在此归档以免与 §13.2/§13.3 的描述脱节：
+
+- **gossip 去重改为"始终入池、仅未见过才中继"**（`fast_finality_p2p.rs`）：原实现在 `seen` 命中时直接丢弃消息，会丢失"已 seen 但池插入失败"的重传，进而造成空洞。现改为 `validate`（BLS 验签 / set 校验）通过后即 `accept_into_pool`（池内 `add_vote`/`add_qc` 自行去重，安全），仅在 `!already_seen` 时 `relay`（防环）。`Repair` 的去重键也从常量 `Cert(0,0,0,255,..)` 改为按 `(set,height,round,phase)` 实际字段（旧键导致仅首个 repair 被应答、其余被静默丢弃，pull-based repair 无法自愈多个空洞）。
+- **run-loop 用 `biased select!` 优先 block-import**（`fast_finality.rs::run`）：原公平 `select!` 会被持续的 vote 通知流饿死 `import_stream`，导致 SFF 在区块导入后很多块才 prepare，前沿落后 GRANDPA。改为 `biased` 把 `import_stream` 放在首位，确保区块导入优先 prepare（前沿不再因导入饿死而滞后）。聚合本身是事件驱动（`take_dirty` 脏键扫描），定时器仅作空闲兜底。

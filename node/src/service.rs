@@ -1090,14 +1090,7 @@ pub async fn new_full_base<N: NetworkBackend<Block, <Block as sp_runtime::traits
             sff_primitives::BlsPublicKey,
             sff_primitives::BlsSignature,
         )> = match sff_dev_key_seed.as_deref() {
-            Some(_) => ["//Alice", "//Bob"]
-                .iter()
-                .filter_map(|dev_seed| {
-                    let seed = sp_core::hashing::blake2_256(dev_seed.as_bytes());
-                    let keypair = sff_crypto::BlsKeypair::from_seed(&seed);
-                    Some((keypair.public(), sff_crypto::pop_sign(&keypair)))
-                })
-                .collect(),
+            Some(_) => crate::chain_spec::dev_sffb_pops(),
             None => crate::chain_spec::initial_config::staging_sffb_pops(),
         };
         let sff_provider = std::sync::Arc::new(crate::fast_finality::RuntimeAuthorityProvider::<

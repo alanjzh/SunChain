@@ -4,9 +4,10 @@
 //! This is a small flood-fill protocol of its own, mirroring `exchange_p2p`:
 //! every message is cheaply size-checked, de-duplicated and rate-limited before
 //! it is decoded or validated, and only *accepted* (validated) messages are
-//! relayed. Validation here is the real BLS check against the candidate
-//! authority set returned by the [`AuthorityProvider`]; invalid traffic is never
-//! amplified.
+//! relayed. Vote *signatures* are NOT checked on receipt — the pool's
+//! `aggregate_votes` re-verifies every constituent vote when a QC is built, so the
+//! only check here is structural sanity (plus a full BLS check for certificates).
+//! Invalid traffic is never amplified.
 //!
 //! F2 is **shadow**: nothing here changes fork choice, runtime state or user
 //! finality. The pool is only read by the observer, which logs/meters diffs.
@@ -39,7 +40,7 @@ use crate::fast_finality::AuthorityProvider;
 use crate::fast_finality_pool::FastFinalityPool;
 
 /// Protocol name. Versioned, so it can evolve without cross-talk.
-pub const SFF_PROTOCOL: &str = "/sun/sff/1";
+pub const SFF_PROTOCOL: &str = "/sun/sff/2";
 
 /// A single wire message. Votes and certificates carry their own signature and
 /// are validated before they are accepted locally or relayed.
@@ -48,6 +49,51 @@ pub enum SffMessage {
     Vote(Vote),
     Certificate(QuorumCertificate),
     Repair(RepairRequest),
+    /// Transport-level receipt for the exact encoded message hash.
+    Ack([u8; 32]),
+}
+
+const DELIVERY_RETRY_BASE: std::time::Duration = std::time::Duration::from_millis(500);
+const DELIVERY_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(8);
+const MAX_PENDING_PER_PEER: usize = 1024;
+const MAX_ACK_HISTORY_PER_PEER: usize = 8192;
+const MAX_CONCURRENT_BLS_VALIDATIONS: usize = 4;
+const MAX_PENDING_VALIDATIONS: usize = 256;
+const MAX_RETRIES_PER_TICK: usize = 4;
+
+struct PendingDelivery {
+    bytes: Vec<u8>,
+    last_sent: std::time::Instant,
+    attempts: u32,
+}
+
+struct PendingValidation {
+    message: SffMessage,
+    waiters: Vec<(sc_network::PeerId, Vec<u8>)>,
+}
+
+#[derive(Default)]
+struct AckHistory {
+    set: HashSet<[u8; 32]>,
+    order: VecDeque<[u8; 32]>,
+}
+
+impl AckHistory {
+    fn contains(&self, id: &[u8; 32]) -> bool {
+        self.set.contains(id)
+    }
+
+    fn insert(&mut self, id: [u8; 32]) {
+        if !self.set.insert(id) {
+            return;
+        }
+        self.order.push_back(id);
+        while self.order.len() > MAX_ACK_HISTORY_PER_PEER {
+            if let Some(oldest) = self.order.pop_front() {
+                self.set.remove(&oldest);
+            }
+        }
+    }
 }
 
 /// "Do you have the QC for `(set_id, height, round, phase)`?" — answered by
@@ -58,6 +104,8 @@ pub struct RepairRequest {
     pub height: u32,
     pub round: u32,
     pub phase: Phase,
+    /// Distinguishes a later retry after an earlier request was ACKed as received.
+    pub request_id: u32,
 }
 
 /// Builds the notification-protocol config, mirroring how GRANDPA / exchange
@@ -115,6 +163,8 @@ pub const MAX_MALFORMED_PER_WINDOW: u32 = 64;
 pub enum SeenKey {
     Vote(u64, u32, u32, u8, u32),
     Cert(u64, u32, u32, u8, [u8; 32]),
+    Repair(u64, u32, u32, u8, u32),
+    Ack([u8; 32]),
 }
 
 /// Bounded set of already-seen ids, evicting the oldest when full.
@@ -221,24 +271,63 @@ pub async fn run_sff_gossip<B, C, P>(
     let mut peers: HashSet<sc_network::PeerId> = HashSet::new();
     let mut seen = Seen::new(8192);
     let mut limits = RateLimiter::new();
+    let mut pending: HashMap<sc_network::PeerId, HashMap<[u8; 32], PendingDelivery>> =
+        HashMap::new();
+    let mut acknowledged: HashMap<sc_network::PeerId, AckHistory> = HashMap::new();
+    let mut validating: HashMap<SeenKey, PendingValidation> = HashMap::new();
+    let (validated_tx, mut validated_rx) =
+        tokio::sync::mpsc::channel::<(SeenKey, bool)>(MAX_PENDING_VALIDATIONS);
+    let validation_slots = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_BLS_VALIDATIONS));
+    let mut retry_tick = tokio::time::interval(std::time::Duration::from_millis(100));
+    retry_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut gossip_local_count: u64 = 0;
+    let mut gossip_event_count: u64 = 0;
+    let mut gossip_ack_count: u64 = 0;
+    let mut total_iter: u64 = 0;
+    let mut last_hb = std::time::Instant::now();
+    let mut last_wait_ms: u64 = 0;
+    let mut last_proc_ms: u64 = 0;
 
     loop {
-        use futures::{future::Either, StreamExt};
+        use futures::StreamExt;
 
         enum Which {
             Event(Option<NotificationEvent>),
             Local(Option<Vec<u8>>),
+            Retry,
+            Validated(Option<(SeenKey, bool)>),
         }
-        let which =
-            match futures::future::select(Box::pin(service.next_event()), Box::pin(local.next()))
-                .await
-            {
-                Either::Left((event, _rest)) => Which::Event(event),
-                Either::Right((bytes, _rest)) => Which::Local(bytes),
-            };
+        let wait_start = std::time::Instant::now();
+        let which = tokio::select! {
+            event = service.next_event() => Which::Event(event),
+            bytes = local.next() => Which::Local(bytes),
+            _ = retry_tick.tick() => Which::Retry,
+            validation = validated_rx.recv() => Which::Validated(validation),
+        };
+        last_wait_ms = wait_start.elapsed().as_millis() as u64;
+        let proc_start = std::time::Instant::now();
 
         match which {
             Which::Local(Some(bytes)) => {
+                // Diagnostic (option A): show what our own engine submits, so we can
+                // confirm a node's votes actually enter its gossip loop (vs. a broken
+                // engine→gossip channel) — and how fast the local channel floods.
+                if let Ok(m) = SffMessage::decode(&mut &bytes[..]) {
+                    match &m {
+                        SffMessage::Vote(v) => log::debug!(
+                            target: "sff",
+                            "gossip-local: Vote set_id={} h={} round={} {:?} signer={}",
+                            v.set_id, v.height, v.round, v.phase, v.signer_index
+                        ),
+                        SffMessage::Certificate(qc) => log::debug!(
+                            target: "sff",
+                            "gossip-local: Cert set_id={} h={} round={} {:?}",
+                            qc.set_id, qc.height, qc.round, qc.phase
+                        ),
+                        SffMessage::Repair(_) => {}
+                        SffMessage::Ack(_) => {}
+                    }
+                }
                 // Local submit from our own engine. Always relay: re-transmissions
                 // (re-sent votes from `maintain_votes` / `request_repairs`) are how we
                 // heal votes the peer lost in gossip, so they MUST reach the peer. We
@@ -248,19 +337,80 @@ pub async fn run_sff_gossip<B, C, P>(
                 if let Some(k) = local_seen_key(&bytes) {
                     seen.insert(k);
                 }
-                relay(&mut service, &peers, &bytes).await;
-                continue;
+                gossip_local_count += 1;
+                relay_reliably(&mut service, &peers, &bytes, &mut pending, &acknowledged).await;
             }
             Which::Local(None) => continue,
-            Which::Event(None) => break,
+            Which::Retry => {
+                retry_pending(&mut service, &mut pending).await;
+            }
+            Which::Validated(Some((key, valid))) => {
+                if let Some(pending_validation) = validating.remove(&key) {
+                    if valid {
+                        seen.insert(key);
+                        accept_into_pool(&pool, &pending_validation.message);
+                        let relay_bytes = pending_validation
+                            .waiters
+                            .first()
+                            .map(|(_, bytes)| bytes.clone());
+                        if let Some((first_peer, _)) = pending_validation.waiters.first() {
+                            match &pending_validation.message {
+                                SffMessage::Vote(v) => log::info!(
+                                    target: "sff",
+                                    "gossip-rcv: Vote set_id={} h={} round={} {:?} signer={} from {}",
+                                    v.set_id, v.height, v.round, v.phase, v.signer_index,
+                                    first_peer.to_base58()
+                                ),
+                                SffMessage::Certificate(qc) => log::info!(
+                                    target: "sff",
+                                    "gossip-rcv: Cert set_id={} h={} round={} {:?} from {}",
+                                    qc.set_id, qc.height, qc.round, qc.phase,
+                                    first_peer.to_base58()
+                                ),
+                                SffMessage::Repair(_) | SffMessage::Ack(_) => {}
+                            }
+                        }
+                        for (peer, bytes) in &pending_validation.waiters {
+                            send_ack(&mut service, peer, bytes).await;
+                        }
+                        if let Some(bytes) = relay_bytes {
+                            relay_reliably(
+                                &mut service,
+                                &peers,
+                                &bytes,
+                                &mut pending,
+                                &acknowledged,
+                            )
+                            .await;
+                        }
+                    } else {
+                        log::info!(
+                            target: "sff",
+                            "gossip-drop: invalid/unknown-set message; waiters={}",
+                            pending_validation.waiters.len()
+                        );
+                    }
+                }
+            }
+            Which::Validated(None) => continue,
+            Which::Event(None) => {
+                log::warn!(
+                    target: "sff",
+                    "gossip: next_event returned None — exiting gossip loop (service closed?)"
+                );
+                break;
+            }
             Which::Event(Some(event)) => match event {
                 NotificationEvent::NotificationStreamOpened { peer, .. } => {
                     log::debug!(target: "sff", "gossip: substream opened with {peer}");
                     peers.insert(peer);
+                    gossip_event_count += 1;
                 }
                 NotificationEvent::NotificationStreamClosed { peer } => {
                     log::debug!(target: "sff", "gossip: substream closed with {peer}");
                     peers.remove(&peer);
+                    acknowledged.remove(&peer);
+                    gossip_event_count += 1;
                 }
                 NotificationEvent::NotificationReceived { peer, notification } => {
                     let peer_bytes = peer.to_bytes();
@@ -286,20 +436,34 @@ pub async fn run_sff_gossip<B, C, P>(
                         continue;
                     }
 
-                    if !limits.allow(&peer_bytes) {
+                    // ACKs are small transport bookkeeping and must not consume
+                    // the same per-window budget as votes and certificates.
+                    if !matches!(&msg, SffMessage::Ack(_)) && !limits.allow(&peer_bytes) {
                         log::debug!(target: "sff", "gossip: dropped peer message (rate limited)");
+                        continue;
+                    }
+
+                    if let SffMessage::Ack(id) = &msg {
+                        if let Some(deliveries) = pending.get_mut(&peer) {
+                            if deliveries.remove(id).is_some() {
+                                acknowledged.entry(peer.clone()).or_default().insert(*id);
+                                gossip_ack_count += 1;
+                                log::debug!(target: "sff", "gossip-ack: peer={} pending={}", peer, deliveries.len());
+                            }
+                        }
                         continue;
                     }
 
                     // A repair request is answered back to the asker only.
                     if let SffMessage::Repair(req) = &msg {
+                        send_ack(&mut service, &peer, &notification).await;
                         if let Some(qc) = answer_repair(&pool, req) {
                             log::debug!(
                                 target: "sff",
                                 "gossip: repair req set_id={} height={} round={} phase={:?} answered=true",
                                 req.set_id, req.height, req.round, req.phase
                             );
-                            let _ = service.send_async_notification(&peer, qc).await;
+                            send_notification(&mut service, &peer, &qc).await;
                         } else {
                             log::debug!(
                                 target: "sff",
@@ -311,30 +475,59 @@ pub async fn run_sff_gossip<B, C, P>(
                     }
 
                     let key = seen_key(&msg);
-                    let already_seen = seen.set.contains(&key);
-                    if !already_seen {
-                        if !validate(&provider, client.info().genesis_hash, &msg) {
-                            // Invalid (bad signature / set / unknown set) — drop.
-                            log::debug!(target: "sff", "gossip: dropped invalid/unknown-set message");
-                            continue;
+                    if seen.set.contains(&key) {
+                        accept_into_pool(&pool, &msg);
+                        send_ack(&mut service, &peer, &notification).await;
+                        continue;
+                    }
+
+                    if let Some(pending_validation) = validating.get_mut(&key) {
+                        if pending_validation.waiters.len() < 64 {
+                            pending_validation.waiters.push((peer, notification));
                         }
-                        // Invalid traffic cannot reserve a valid message's dedup key.
-                        seen.insert(key);
+                        continue;
                     }
 
-                    // Always accept into the local pool. `add_vote`/`add_qc` de-duplicate
-                    // internally, so this is safe; and a re-transmission that we already
-                    // "saw" may still be needed if the original was received but its pool
-                    // insert was lost — so we must not drop it on the `seen` check. Only
-                    // the *relay* is suppressed when already seen (loop prevention).
-                    accept_into_pool(&pool, &msg);
-
-                    if !already_seen {
-                        relay(&mut service, &peers, &notification).await;
+                    if validating.len() >= MAX_PENDING_VALIDATIONS {
+                        log::debug!(target: "sff", "gossip: validation queue full; leaving message unacked for retry");
+                        continue;
                     }
+
+                    validating.insert(
+                        key.clone(),
+                        PendingValidation {
+                            message: msg.clone(),
+                            waiters: vec![(peer, notification)],
+                        },
+                    );
+                    let provider = provider.clone();
+                    let genesis_hash = client.info().genesis_hash;
+                    let slots = validation_slots.clone();
+                    let tx = validated_tx.clone();
+                    tokio::spawn(async move {
+                        let valid = match slots.acquire_owned().await {
+                            Ok(_permit) => gossip_validate(&provider, genesis_hash, &msg),
+                            Err(_) => false,
+                        };
+                        let _ = tx.send((key, valid)).await;
+                    });
                 }
                 _ => {}
             },
+        }
+        // --- loop liveness / bottleneck probe (option A) ---
+        last_proc_ms = proc_start.elapsed().as_millis() as u64;
+        total_iter += 1;
+        let now = std::time::Instant::now();
+        if now.duration_since(last_hb) > std::time::Duration::from_secs(5) {
+            let pending_count: usize = pending.values().map(HashMap::len).sum();
+            log::info!(
+                target: "sff",
+                "gossip-loop alive: iter={} local={} event={} ack={} pending={} validating={} last_wait={}ms last_proc={}ms peers={}",
+                total_iter, gossip_local_count, gossip_event_count, gossip_ack_count,
+                pending_count, validating.len(), last_wait_ms, last_proc_ms, peers.len()
+            );
+            last_hb = now;
         }
     }
 }
@@ -358,26 +551,66 @@ fn seen_key(msg: &SffMessage) -> SeenKey {
             qc.phase as u8,
             qc.vote_payload_hash.0,
         ),
-        // A repair request must be de-duplicated by its *actual* target, not a
-        // constant — the old code keyed every repair to the same `Cert(0,0,0,255,..)`
-        // which meant the first repair was accepted and every later one was silently
-        // dropped by the dedup, so the pull-based repair (P1-6) could never heal more
-        // than one hole. Keying on the request fields lets each distinct request be
-        // answered once while still collapsing identical re-requests. The trailing
-        // 32 bytes are left zero: a repair and a certificate for the same
-        // `(set, height, round, phase)` share a key, which is correct — once you have
-        // the certificate you do not need to re-answer the matching repair.
-        SffMessage::Repair(req) => SeenKey::Cert(
+        SffMessage::Repair(req) => SeenKey::Repair(
             req.set_id,
             req.height,
             req.round,
             req.phase as u8,
-            [0u8; 32],
+            req.request_id,
         ),
+        SffMessage::Ack(id) => SeenKey::Ack(*id),
     }
 }
 
-/// BLS-validates a message against the candidate authority set.
+/// Cheap structural sanity check for a gossip message — NO BLS.
+///
+/// Vote *signatures* and PoPs are intentionally NOT checked here. The pool's
+/// `aggregate_votes` re-verifies every constituent vote (PoP + signature) when a QC
+/// is built, so re-checking each vote on every receipt is pure waste and — under four
+/// co-located validators contending for CPU — was the dominant BLS cost that stalled
+/// the gossip loop. We only reject grossly malformed messages (unknown set,
+/// out-of-range signer index, wrong genesis) so the pool and relay stay clean.
+///
+/// Certificates (QCs) ARE verified here: they are a single aggregate signature (one
+/// pairing) and we must trust a delivered certificate to advance the frontier.
+///
+/// Trust assumption: a *trusted* validator set. On an adversarial network a forged
+/// vote could occupy a signer slot before the honest one arrives and starve QC
+/// formation; harden by verifying votes on receipt, or by filtering invalid votes in
+/// `try_build_qc` instead of aborting the whole aggregate.
+fn gossip_validate<P: AuthorityProvider>(
+    provider: &Arc<P>,
+    genesis_hash: sp_core::H256,
+    msg: &SffMessage,
+) -> bool {
+    match msg {
+        SffMessage::Vote(v) => {
+            if v.genesis_hash != genesis_hash {
+                return false;
+            }
+            let Some(set) = provider.authorities(v.set_id) else {
+                return false;
+            };
+            v.signer_index < set.authorities.len() as u32
+        }
+        SffMessage::Certificate(qc) => {
+            if qc.genesis_hash != genesis_hash {
+                return false;
+            }
+            let Some(set) = provider.authorities(qc.set_id) else {
+                return false;
+            };
+            verify_qc(qc, &set).is_ok()
+        }
+        SffMessage::Repair(_) | SffMessage::Ack(_) => true,
+    }
+}
+
+/// Full BLS validation of a message against the candidate authority set.
+///
+/// Used by tests (and anywhere a definitive check is needed). The hot gossip path
+/// uses the cheaper [`gossip_validate`], relying on `aggregate_votes` to re-check
+/// votes at QC-build time.
 fn validate<P: AuthorityProvider>(
     provider: &Arc<P>,
     genesis_hash: sp_core::H256,
@@ -391,8 +624,6 @@ fn validate<P: AuthorityProvider>(
             let Some(set) = provider.authorities(v.set_id) else {
                 return false;
             };
-            // Off-chain PoP re-validation of the signer's key is the node's job;
-            // `verify_vote` confirms signature + domain + set binding.
             verify_vote(v, &set).is_ok()
         }
         SffMessage::Certificate(qc) => {
@@ -404,7 +635,7 @@ fn validate<P: AuthorityProvider>(
             };
             verify_qc(qc, &set).is_ok()
         }
-        SffMessage::Repair(_) => true,
+        SffMessage::Repair(_) | SffMessage::Ack(_) => true,
     }
 }
 
@@ -420,7 +651,7 @@ fn accept_into_pool(pool: &Arc<Mutex<FastFinalityPool>>, msg: &SffMessage) {
         SffMessage::Certificate(qc) => {
             p.add_qc(qc.clone());
         }
-        SffMessage::Repair(_) => {}
+        SffMessage::Repair(_) | SffMessage::Ack(_) => {}
     }
 }
 
@@ -431,16 +662,114 @@ fn answer_repair(pool: &Arc<Mutex<FastFinalityPool>>, req: &RepairRequest) -> Op
     Some(msg.encode())
 }
 
-async fn relay(
+async fn relay_reliably(
     service: &mut Box<dyn NotificationService>,
     peers: &HashSet<sc_network::PeerId>,
     notification: &[u8],
+    pending: &mut HashMap<sc_network::PeerId, HashMap<[u8; 32], PendingDelivery>>,
+    acknowledged: &HashMap<sc_network::PeerId, AckHistory>,
 ) {
+    let bytes = notification.to_vec();
+    let id = sp_core::hashing::blake2_256(&bytes);
     for peer in peers {
-        let _ = service
-            .send_async_notification(peer, notification.to_vec())
-            .await;
+        if acknowledged
+            .get(peer)
+            .is_some_and(|history| history.contains(&id))
+        {
+            continue;
+        }
+        let queue = pending.entry(peer.clone()).or_default();
+        if queue.contains_key(&id) {
+            continue;
+        }
+        if queue.len() >= MAX_PENDING_PER_PEER {
+            log::warn!(target: "sff", "gossip-outbox full for {peer}; pending={}", queue.len());
+            continue;
+        }
+        queue.insert(
+            id,
+            PendingDelivery {
+                bytes: bytes.clone(),
+                last_sent: std::time::Instant::now(),
+                attempts: 1,
+            },
+        );
+        send_notification(service, peer, &bytes).await;
     }
+}
+
+async fn retry_pending(
+    service: &mut Box<dyn NotificationService>,
+    pending: &mut HashMap<sc_network::PeerId, HashMap<[u8; 32], PendingDelivery>>,
+) {
+    let now = std::time::Instant::now();
+    let mut due = Vec::new();
+    for (peer, deliveries) in pending.iter() {
+        for (id, delivery) in deliveries {
+            if now.duration_since(delivery.last_sent) >= retry_delay(delivery.attempts) {
+                due.push((delivery.last_sent, peer.clone(), *id));
+            }
+        }
+    }
+    due.sort_by_key(|(last_sent, _, _)| *last_sent);
+    due.truncate(MAX_RETRIES_PER_TICK);
+    for (_, peer, id) in due {
+        let Some(delivery) = pending
+            .get_mut(&peer)
+            .and_then(|entries| entries.get_mut(&id))
+        else {
+            continue;
+        };
+        delivery.last_sent = std::time::Instant::now();
+        delivery.attempts = delivery.attempts.saturating_add(1);
+        let attempts = delivery.attempts;
+        let bytes = delivery.bytes.clone();
+        if attempts == 2 || attempts.is_power_of_two() {
+            log::debug!(target: "sff", "gossip-retry: peer={} id={} attempts={}", peer, hex(&id), attempts);
+        }
+        send_notification(service, &peer, &bytes).await;
+    }
+}
+
+fn retry_delay(attempts: u32) -> std::time::Duration {
+    let shift = attempts.saturating_sub(1).min(4);
+    DELIVERY_RETRY_BASE
+        .checked_mul(1u32 << shift)
+        .unwrap_or(DELIVERY_RETRY_MAX)
+        .min(DELIVERY_RETRY_MAX)
+}
+
+async fn send_notification(
+    service: &mut Box<dyn NotificationService>,
+    peer: &sc_network::PeerId,
+    notification: &[u8],
+) {
+    let t0 = std::time::Instant::now();
+    let send = service.send_async_notification(peer, notification.to_vec());
+    match tokio::time::timeout(std::time::Duration::from_millis(500), send).await {
+        Ok(Ok(())) => {
+            let d = t0.elapsed().as_millis();
+            if d > 5 {
+                log::debug!(target: "sff", "gossip-send to {peer} ok {}ms", d);
+            }
+        }
+        Ok(Err(e)) => {
+            log::warn!(target: "sff", "gossip: send to {peer} failed: {e:?}");
+        }
+        Err(_) => {
+            log::warn!(target: "sff", "gossip: send to {peer} TIMED OUT");
+        }
+    }
+}
+
+async fn send_ack(
+    service: &mut Box<dyn NotificationService>,
+    peer: &sc_network::PeerId,
+    notification: &[u8],
+) {
+    let id = sp_core::hashing::blake2_256(notification);
+    let ack = SffMessage::Ack(id).encode();
+    send_notification(service, peer, &ack).await;
 }
 
 #[cfg(test)]

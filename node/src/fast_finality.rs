@@ -26,7 +26,7 @@ use sp_runtime::traits::{Block as BlockT, Header as HeaderT, UniqueSaturatedInto
 use sunchain_runtime::apis::FastFinalityApi;
 use tokio::{sync::Notify, time::interval};
 
-use sff_crypto::{pop_verify, verify_vote};
+use sff_crypto::{pop_verify, verify};
 use sff_primitives::{
     BlsPublicKey, BlsSignature, FinalityAuthoritySet, Phase, Vote, SFF_PROTOCOL_VERSION,
 };
@@ -55,11 +55,12 @@ pub trait SffSigner: Send + Sync {
 /// Minimum spacing between two "SFF is dormant" warnings.
 const DORMANT_LOG_INTERVAL: Duration = Duration::from_secs(30);
 
-/// How many blocks behind the tip SFF may still track.
+/// Cap on how many heights `maintain_votes` re-sends per healing tick.
 ///
-/// Anything older is dropped: a shadow confirmation that far behind is useless,
-/// and keeping it is what made aggregation cost grow with the backlog.
-const MAX_BACKLOG_HEIGHTS: u32 = 64;
+/// Each healing tick handles a bounded batch, starting at the oldest unresolved
+/// height. This bounds the outbound storm without starving the hole that blocks
+/// the contiguous fast-confirmation frontier.
+const MAX_REPAIR_WINDOW: u32 = 4;
 
 /// How many blocks a `(height, round)` may wait for its PrepareQC before the
 /// engine advances the round and emits a `Skip` (§13.3 P1-5).
@@ -68,7 +69,7 @@ const MAX_BACKLOG_HEIGHTS: u32 = 64;
 /// PrepareQC in 1–2 blocks, so it is never advanced spuriously. The only thing
 /// that can keep a height unconfirmed past a few blocks is a *lost* vote, and
 /// that is healed by `maintain_votes` re-sends (every `REPAIR_INTERVAL_BLOCKS`)
-/// and `request_repairs` (`REPAIR_INTERVAL_BLOCKS`) plus `repush_certificates`
+/// and `request_repairs` (`REPAIR_REQUEST_INTERVAL_BLOCKS`) plus `repush_certificates`
 /// re-gossip — all of which redeliver the missing vote/certificate within a
 /// handful of blocks. Setting this too low (the old 8) meant a transient loss
 /// would trip a `Skip` *before* the healing redelivery arrived, cascading into a
@@ -80,16 +81,18 @@ const ROUND_TIMEOUT_BLOCKS: u32 = 32;
 /// Minimum number of blocks between two `RepairRequest`s / vote re-sends for the
 /// same `(set, height, phase)`. Repairs are only sent for heights that are
 /// actually missing a certificate (P1-6), so this just bounds the retry cadence.
-/// Set to 1 so healing redelivers a lost vote/certificate on the very next block —
-/// this is what lets SFF confirm heights within the GRANDPA finality lag (so the
-/// served frontier tracks instead of lagging by the re-send cadence).
-const REPAIR_INTERVAL_BLOCKS: u32 = 1;
+/// Keep periodic catch-up bounded while the reliable P2P outbox retries individual
+/// messages. A four-block cadence avoids flooding the local gossip queue with the
+/// same votes while still repairing a missed height well inside the round timeout.
+const REPAIR_INTERVAL_BLOCKS: u32 = 4;
+/// Re-ask for a certificate four blocks after an ACKed request that found none.
+const REPAIR_REQUEST_INTERVAL_BLOCKS: u32 = 4;
 
 /// Re-gossip of *certificates* (push-based healing, P1-6 belt-and-suspenders).
 /// A pushed certificate heals a height in a single hop (no vote round-trip), so a
 /// moderately frequent re-gossip keeps the served frontier tracking GRANDPA even
 /// when the point-to-point vote/re-pair path is lossy. Kept at 4 (not 1) because
-/// it is heavier than vote re-sends; the per-block vote re-send covers the common
+/// it is heavier than vote re-sends; periodic vote re-sends cover the common
 /// case, this mop-up handles the rest.
 const REPUSH_INTERVAL_BLOCKS: u32 = 4;
 
@@ -306,6 +309,9 @@ struct FastFinalityEngine<B, C, P, S: ?Sized> {
     view: Arc<FastFinalityView>,
     /// Last time a "dormant" reason was logged (rate limit).
     last_dormant_log: Mutex<Option<std::time::Instant>>,
+    /// PoPs are immutable for an authority snapshot; avoid repeating their BLS
+    /// pairing checks every time the engine reads the current set.
+    checked_pop_sets: Mutex<HashSet<(u64, H256)>>,
     our_index: Mutex<Option<(u64, H256, u32)>>,
     sent_prepares: Mutex<HashSet<(u64, u32, u32)>>,
     sent_commits: Mutex<HashSet<(u64, u32, u32)>>,
@@ -338,9 +344,15 @@ where
     /// be visible: "no certificates" is indistinguishable from "broken" without
     /// this, and silence is the one failure mode operators cannot debug.
     fn note_dormant(&self, reason: &str) {
-        let mut last = self.last_dormant_log.lock().unwrap_or_else(|e| e.into_inner());
+        let mut last = self
+            .last_dormant_log
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let now = std::time::Instant::now();
-        if last.map(|t| now.duration_since(t) >= DORMANT_LOG_INTERVAL).unwrap_or(true) {
+        if last
+            .map(|t| now.duration_since(t) >= DORMANT_LOG_INTERVAL)
+            .unwrap_or(true)
+        {
             *last = Some(now);
             log::warn!(target: "sff", "SFF is dormant: {reason}");
         }
@@ -350,16 +362,27 @@ where
     fn current_set(&self) -> Option<FinalityAuthoritySet> {
         let set_id = self.provider.current_set_id()?;
         let set = self.provider.authorities(set_id)?;
-        // Off-chain PoP re-validation (the runtime cannot do BLS). Log — but keep
-        // the set intact so signer indices stay aligned with every vote.
-        for a in &set.authorities {
-            if !pop_verify(&a.bls_public_key, &a.proof_of_possession) {
-                log::warn!(
-                    target: "sff",
-                    "authority {} has an invalid BLS proof-of-possession",
-                    a.validator_id
-                );
+        let snapshot = (set.set_id, set.snapshot_root);
+        let mut checked = self
+            .checked_pop_sets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if !checked.contains(&snapshot) {
+            // Off-chain PoP re-validation (the runtime cannot do BLS). Log — but
+            // keep the set intact so signer indices stay aligned with every vote.
+            for a in &set.authorities {
+                if !pop_verify(&a.bls_public_key, &a.proof_of_possession) {
+                    log::warn!(
+                        target: "sff",
+                        "authority {} has an invalid BLS proof-of-possession",
+                        a.validator_id
+                    );
+                }
             }
+            if checked.len() >= 64 {
+                checked.clear();
+            }
+            checked.insert(snapshot);
         }
         Some(set)
     }
@@ -453,10 +476,15 @@ where
             signer_index: idx,
             signature: BlsSignature::ZERO,
         };
-        vote.signature = self
-            .signer
-            .sign(&set.authorities[idx as usize].bls_public_key, &vote.canonical_bytes())?;
-        if verify_vote(&vote, set).is_err() {
+        vote.signature = self.signer.sign(
+            &set.authorities[idx as usize].bls_public_key,
+            &vote.canonical_bytes(),
+        )?;
+        if !verify(
+            &set.authorities[idx as usize].bls_public_key,
+            &vote.canonical_bytes(),
+            &vote.signature,
+        ) {
             log::warn!(
                 target: "sff",
                 "self {:?} vote failed verification at height {} round {}; skipping",
@@ -548,15 +576,8 @@ where
         }
         // A Skip attests no block: `block_hash` is `None`, `parent_hash` is zero
         // (both nodes agree), so any two Skip votes for `(height, round)` aggregate.
-        let Some(vote) = self.build_vote(
-            set,
-            height,
-            round,
-            Phase::Skip,
-            None,
-            H256::zero(),
-            None,
-        ) else {
+        let Some(vote) = self.build_vote(set, height, round, Phase::Skip, None, H256::zero(), None)
+        else {
             self.sent_skips
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -602,7 +623,9 @@ where
             let mut rs = self.round_state.lock().unwrap_or_else(|e| e.into_inner());
             // Unknown height: adopt the advance but we have no target block to
             // re-prepare against, so just record the round and stop.
-            let st = rs.entry((set.set_id, height)).or_insert_with(RoundState::default);
+            let st = rs
+                .entry((set.set_id, height))
+                .or_insert_with(RoundState::default);
             if st.prepare_done.is_some() {
                 return; // already committed at some round; do not advance.
             }
@@ -650,7 +673,13 @@ where
                     "advance_rounds: STALL height={} set_id={} round={} prepare_done={:?} first_prepared_at={} best={} diff={}",
                     height, set_id, st.current_round, st.prepare_done, st.first_prepared_at, best, best.saturating_sub(st.first_prepared_at)
                 );
-                stalled.push((*set_id, *height, st.current_round, st.block_hash, st.parent_hash));
+                stalled.push((
+                    *set_id,
+                    *height,
+                    st.current_round,
+                    st.block_hash,
+                    st.parent_hash,
+                ));
             }
         }
         for (set_id, height, round, block_hash, _parent_hash) in stalled {
@@ -688,7 +717,7 @@ where
         let best: u32 = info.best_number.unique_saturated_into();
         let finalized: u32 = info.finalized_number.unique_saturated_into();
         // Anchor the healing window at the *frontier* (last fast-confirmed height)
-        // rather than at `best - MAX_BACKLOG_HEIGHTS`. The only heights whose votes
+        // rather than at a rolling tail behind best. The only heights whose votes
         // still need gathering are those between the frontier and `best`; anchoring
         // here means a missed vote — even well below the rolling backlog window —
         // is still re-sent, so the frontier advances instead of freezing on a
@@ -709,30 +738,44 @@ where
         if floor >= best {
             return;
         }
-        // Re-send for every height we have prepared (present in `round_state`) that
-        // is still in the working window.
-        let entries: Vec<(u64, u32, u32, H256, H256)> = {
-            let mut rs = self.round_state.lock().unwrap_or_else(|e| e.into_inner());
-            rs.iter_mut()
-                .filter(|((_, h), st)| *h > floor && st.first_prepared_at != 0)
-                .map(|((sid, h), st)| {
-                    // Refresh the staleness timer: we are about to actively re-send
-                    // this height's votes, so it is *not* stalled. This is what
-                    // prevents the round-advance from firing during catch-up /
-                    // healing purely because `best` has raced ahead of the block
-                    // height we first prepared — the chain produces blocks faster
-                    // than real-time vote redelivery, so a height can be only
-                    // seconds old in wall-clock yet dozens of blocks "stale" by the
-                    // `best - first_prepared_at` metric. With the timer refreshed
-                    // here every `REPAIR_INTERVAL_BLOCKS`, a height is only ever
-                    // flagged stalled (and Skipped) if we have genuinely stopped
-                    // healing it — i.e. it is committed or has fallen below the
-                    // window.
-                    st.first_prepared_at = best;
-                    (*sid, *h, st.current_round, st.block_hash, st.parent_hash)
-                })
-                .collect()
+        // Re-send a bounded batch, starting at the oldest unresolved height.
+        // Selecting only the most recent window strands any older hole forever.
+        let mut candidates: Vec<(u64, u32, u32, H256, H256)> = {
+            let rs = self.round_state.lock().unwrap_or_else(|e| e.into_inner());
+            let mut eligible: Vec<_> = rs
+                .iter()
+                .filter(|((_, h), st)| *h > floor && *h <= best && st.first_prepared_at != 0)
+                .map(|((sid, h), st)| (*sid, *h, st.current_round, st.block_hash, st.parent_hash))
+                .collect();
+            eligible.sort_by_key(|(_, h, _, _, _)| *h);
+            eligible
         };
+        // Filter completed heights BEFORE applying the batch limit. Otherwise the
+        // oldest 32 committed entries permanently occupy every batch and later
+        // unresolved heights never get retried.
+        {
+            let pool = self.pool.lock().unwrap_or_else(|e| e.into_inner());
+            candidates.retain(|(sid, h, round, _, _)| {
+                pool.qc_for(*sid, Phase::Commit, *h, *round).is_none()
+            });
+        }
+        candidates.truncate(MAX_REPAIR_WINDOW as usize);
+        let entries = candidates;
+        {
+            let mut rs = self.round_state.lock().unwrap_or_else(|e| e.into_inner());
+            for (set_id, height, _, _, _) in &entries {
+                if let Some(st) = rs.get_mut(&(*set_id, *height)) {
+                    // Healing refreshes the staleness clock, preventing a Skip
+                    // while redelivery is actively under way.
+                    st.first_prepared_at = best;
+                }
+            }
+        }
+        log::info!(
+            target: "sff",
+            "heal: maintain_votes re-sending {} heights [floor={}..best={}]",
+            entries.len(), floor, best
+        );
         for (set_id, h, round, block_hash, parent_hash) in entries {
             let Some(authorities) = self.provider.authorities(set_id) else {
                 continue;
@@ -839,18 +882,18 @@ where
         // is keyed.
         let entries: Vec<(u64, u32, u32)> = {
             let rs = self.round_state.lock().unwrap_or_else(|e| e.into_inner());
-            rs.iter()
-                .filter(|((_, h), st)| *h > floor && st.first_prepared_at != 0)
+            let mut eligible: Vec<_> = rs
+                .iter()
+                .filter(|((_, h), st)| *h > floor && *h <= best && st.first_prepared_at != 0)
                 .map(|((sid, h), st)| (*sid, *h, st.current_round))
-                .collect()
+                .collect();
+            eligible.sort_by_key(|(_, h, _)| *h);
+            eligible
         };
         let mut to_ask: Vec<RepairRequest> = Vec::new();
         {
             let pool = self.pool.lock().unwrap_or_else(|e| e.into_inner());
-            let mut last = self
-                .last_repair
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let mut last = self.last_repair.lock().unwrap_or_else(|e| e.into_inner());
             for (set_id, h, round) in entries {
                 if pool.qc_for(set_id, Phase::Commit, h, round).is_some() {
                     continue; // already fast-confirmed; nothing to repair.
@@ -862,16 +905,22 @@ where
                 };
                 let key = (set_id, h, phase);
                 let prev = last.get(&key).copied().unwrap_or(0);
-                if best.saturating_sub(prev) < REPAIR_INTERVAL_BLOCKS {
+                if best.saturating_sub(prev) < REPAIR_REQUEST_INTERVAL_BLOCKS {
                     continue;
                 }
-                last.insert(key, best);
                 to_ask.push(RepairRequest {
                     set_id,
                     height: h,
                     round: r,
                     phase,
+                    request_id: best,
                 });
+                if to_ask.len() >= MAX_REPAIR_WINDOW as usize {
+                    break;
+                }
+            }
+            for req in &to_ask {
+                last.insert((req.set_id, req.height, req.phase), best);
             }
         }
         for req in to_ask {
@@ -897,15 +946,13 @@ where
         let info = self.client.info();
         let best: u32 = info.best_number.unique_saturated_into();
         let finalized: u32 = info.finalized_number.unique_saturated_into();
-        let floor = finalized.min(best.saturating_sub(MAX_BACKLOG_HEIGHTS));
+        let frontier = self.view.fast_confirmed_height().unwrap_or(0);
+        let floor = finalized.min(frontier);
         if floor >= best {
             return;
         }
         {
-            let mut cur = self
-                .repush_cursor
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let mut cur = self.repush_cursor.lock().unwrap_or_else(|e| e.into_inner());
             if best.saturating_sub(*cur) < REPUSH_INTERVAL_BLOCKS {
                 return;
             }
@@ -926,7 +973,6 @@ where
         }
     }
 
-
     /// Aggregate any ready votes for one `(phase, height, round)` and broadcast
     /// the resulting certificate. On a PrepareQC, trigger our Commit vote.
     fn aggregation_step_for(
@@ -943,6 +989,15 @@ where
                 .try_build_qc(set, phase, height, round)
         };
         if let Some(qc) = qc {
+            // Register the built QC in the pool BEFORE broadcasting. The pool's
+            // `add_qc` is what feeds `new_commit_qcs`, which the observer drains to
+            // publish the F3 fast-confirmation frontier. Previously a locally built
+            // QC was only `broadcast`, relying on gossip to echo it back into our own
+            // pool — but our own certificate is generally *not* relayed back to us,
+            // so the observer never saw it and `fastConfirmedFrontier` stayed `None`
+            // on every node even though QCs formed. Self-registering makes the
+            // frontier advance from our own QCs regardless of gossip delivery.
+            self.pool.lock().unwrap().add_qc(qc.clone());
             log::info!(
                 target: "sff",
                 "built {}QC set_id={} height={} round={} block={:?}",
@@ -985,6 +1040,9 @@ where
                         .unwrap()
                         .try_build_qc(&set, phase, height, round);
                     if let Some(qc) = qc {
+                        // Self-register so the observer publishes the frontier from
+                        // our own QCs (see `aggregation_step_for` for the rationale).
+                        self.pool.lock().unwrap().add_qc(qc.clone());
                         log::info!(
                             target: "sff",
                             "built {}QC set_id={} height={} round={} block={:?}",
@@ -1070,16 +1128,18 @@ where
     /// A shadow confirmation for a block already finalized by GRANDPA is worth
     /// nothing, and keeping un-completable heights in the pool is what turned the
     /// aggregation cost into O(backlog) (§13.2(b)). So the floor is the GRANDPA
-    /// finalized height: a height is only ever pruned *after* it is final and
-    /// therefore can never still be completing — which is why a fixed tail
-    /// (`best - N`) caused holes (a height pruned before its CommitQC formed).
-    /// The fixed window is only a safety net if GRANDPA stalls further than
-    /// `MAX_BACKLOG_HEIGHTS` behind the tip.
+    /// finalized height and the fast-confirmation frontier. Heights above the
+    /// frontier may still contain the evidence needed to complete its next step.
     fn prune_backlog(&self) {
         let info = self.client.info();
-        let best: u32 = info.best_number.unique_saturated_into();
         let finalized: u32 = info.finalized_number.unique_saturated_into();
-        let floor = finalized.min(best.saturating_sub(MAX_BACKLOG_HEIGHTS));
+        // Anchor pruning at the frontier: votes above it may be exactly what is
+        // needed to advance. A fixed `best - N` floor can make an unresolved hole
+        // permanent by deleting its missing evidence.
+        let frontier = self.view.fast_confirmed_height().unwrap_or(0);
+        // Keep unresolved votes above the contiguous frontier: pruning one of
+        // these heights makes its missing evidence impossible to recover.
+        let floor = finalized.min(frontier);
         let mut pool = self.pool.lock().unwrap();
         pool.set_floor(floor);
         pool.prune_below(floor);
@@ -1163,7 +1223,6 @@ where
             ),
         }
     }
-
 }
 
 #[cfg(test)]
@@ -1276,6 +1335,7 @@ pub async fn run_fast_finality<B, C, P, S>(
         genesis_hash,
         view,
         last_dormant_log: Mutex::new(None),
+        checked_pop_sets: Mutex::new(HashSet::new()),
         our_index: Mutex::new(None),
         sent_prepares: Mutex::new(HashSet::new()),
         sent_commits: Mutex::new(HashSet::new()),
