@@ -44,6 +44,7 @@ impl OrderBook {
         let price = self.best_price(side)?;
         let levels = match side { Side::Buy => &mut self.bids, Side::Sell => &mut self.asks };
         let level = levels.get_mut(&price)?;
+        if level.orders.len() == 1 && level.total_lots != filled_lots { return None; }
         let total = level.total_lots.checked_sub(filled_lots)?;
         let id = level.orders.pop_front()?;
         level.total_lots = total;
@@ -57,6 +58,7 @@ impl OrderBook {
         let levels = match side { Side::Buy => &mut self.bids, Side::Sell => &mut self.asks };
         let Some(level) = levels.get_mut(&price) else { return false };
         let Some(index) = level.orders.iter().position(|candidate| *candidate == id) else { return false };
+        if level.orders.len() == 1 && level.total_lots != lots { return false; }
         let Some(total) = level.total_lots.checked_sub(lots) else { return false };
         level.orders.remove(index);
         level.total_lots = total;
