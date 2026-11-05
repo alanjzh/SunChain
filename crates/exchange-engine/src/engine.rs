@@ -341,6 +341,23 @@ mod tests {
     }
 
     #[test]
+    fn ioc_remainder_is_not_added_to_the_book() {
+        let mut engine = MatchingEngine::new();
+        engine.apply(&command(1, 1, 1, place(Side::Sell, 100, 3, 1))).unwrap();
+        let request = OrderRequest {
+            market_id: 1, client_order_id: 2, side: Side::Buy, price_ticks: 100,
+            quantity_lots: 5, tif: TimeInForce::ImmediateOrCancel, post_only: false,
+        };
+        let execution = engine.apply(&command(2, 2, 1, CommandKind::Place(request))).unwrap();
+        assert_eq!(execution.outcome, ApplyOutcome::Applied);
+        assert_eq!(execution.remaining_lots, 2);
+        assert!(engine.order(2).is_none());
+        assert!(engine.depth(1, Side::Sell, 10).is_empty());
+        assert!(engine.depth(1, Side::Buy, 10).is_empty());
+        engine.validate_invariants().unwrap();
+    }
+
+    #[test]
     fn post_only_crossing_order_is_rejected_but_nonce_is_consumed() {
         let mut engine = MatchingEngine::new();
         engine.apply(&command(1, 1, 1, place(Side::Sell, 100, 1, 1))).unwrap();
