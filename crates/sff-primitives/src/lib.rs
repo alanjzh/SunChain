@@ -1,7 +1,7 @@
 //! # sff-primitives
 //!
 //! Shared, `no_std`-compatible data types for the **Sunchain Fast Finality (SFF)**
-//! protocol described in `docs/Sunchain-Alpenglow-Inspired-Fast-Finality-Design.md`.
+//! protocol described in `docs/Consensus/Stage-1/design/Sunchain-Alpenglow-Inspired-Fast-Finality-Design.md`.
 //!
 //! This crate contains **only** pure data types, SCALE encodings, the domain
 //! separation scheme, the authority snapshot shape and the shared error codes.

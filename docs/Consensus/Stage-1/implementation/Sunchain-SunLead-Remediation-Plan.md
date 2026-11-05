@@ -3,6 +3,13 @@
 > 基线：`Sunchain-SunLead-Deterministic-Leader-Development-Plan.md`、P1--P3 Worklog、提交 `1f52424..ba5079b` 与当前实现。
 >
 > 状态：SunLead 已完成 P1--P3 的原型主路径和双节点 E2E（出块、同步、GRANDPA 终局、DEX 执行）；**尚未达到 P4 故障测试或 P5 测试网迁移门槛**。本文是后续整改的执行基线。
+>
+> **【2026-11-05 策略更新｜上位文档：`../Stage-2/design/Sunchain-Consensus-Genesis-Composition-Strategy.md`】**
+> 项目方已决定：共识在 **genesis 时决策**、链生期不动态切换；**没有在运行的链需要升级**，按新链设计。本文据此重定级：
+> - **取消**（§3.1）：§1 原则第 5 条"共识切换由已最终化的链上状态驱动"、§2 中"静态启动门控与可变 `SunLeadActive` 冲突"这一 P0 问题、§4.1 立即措施、§4.2 P5 activation 状态机、§9 R4 迁移设计、§10 "仅适合隔离 devnet 原型"的定性，以及所有"治理批准后方可激活"式 gate。`SunLeadActive` 的 genesis-only 语义由"已知问题"**改判为目标特性**（上位文档 §0 / R6）。
+> - **降级**（§3.2）：§4.3 的独立 rotation provider / 抗偏置 randomness beacon → 收敛为"中立 slot/epoch 参数源"，BABE pallet 可留作兼容读取者。
+> - **保留为硬门槛**（§3.3）：§2 的 P0 正确性项（epoch/slot/timestamp 绑定、资源治理、FindAuthor 去 BABE 化、equivocation→slashing）、P1 项、§8 P4 故障矩阵。这些已归入上位文档 Stage 1。
+> 本文与上位文档冲突时，以上位文档为准。
 
 ## 1. 目标与原则
 
@@ -74,7 +81,12 @@ parent.digest.slot < digest.slot
 - 正确 SunLead digest 配错误 timestamp、future timestamp、重复 slot、倒退 slot。
 - worker 在 epoch 边界前后只为实际 leader author；runtime API、worker、verifier 对同一 absolute slot 返回同一结果。
 
-## 4. P0-B：安全 activation 与 BABE 依赖收敛
+## 4. P0-B：安全 activation 与 BABE 依赖收敛〔§4.1 / §4.2 已取消，§4.3 已降级〕
+
+> **【策略更新】** 本节前提是"要在运行链上动态切换共识"，该前提已不成立：
+> - **§4.1 / §4.2 整体取消**——genesis 决策、链生期不切换，不需要 activation 状态机、双协议 verifier、迁移窗口 verifier 选择、emergency halt。`SunLeadActive` 保持 genesis-only、无 dispatch 翻转（这正是目标语义，上位文档 §0 / R6）。
+> - **§4.3 降级**——不再要求新建独立 rotation provider / randomness beacon；改为中立 slot/epoch 参数源，并需验证 SunLead 链上 BABE randomness 在无 BABE 出块时是否仍推进（上位文档 R2）。
+> 以下保留作历史记录，不再排期。
 
 ### 4.1 立即措施
 
@@ -195,14 +207,19 @@ P4 必须输出可复现脚本、原始日志、指标与结论，不以人工�
 
 **Gate：** P4 完整报告；相对 BABE 不降低可用性/GRANDPA finality；无未解释 panic 或 import failure。
 
-### R4：P5 迁移设计与测试网
+### R4：P5 迁移设计与测试网〔已取消〕
 
-1. 双协议 verifier 和 finalized activation 状态机。
-2. 新旧节点混跑、错误 activation、紧急停产、回滚演练。
-3. 至少 30 天多地域测试网观察。
+> **【策略更新】本节整体取消**：无存量链、无迁移、无动态切换，不需要双协议 verifier / activation 状态机 / 混跑 / 回滚 / 30 天迁移观察，也不再有"治理批准后方可激活"这一切换 gate。外部**安全审计仍保留**，但性质改为"SFF 作为权威终局"的安全前置（上位文档 §3.3 B5 / Stage 2），与共识切换无关。
 
-**Gate：** 独立安全审计完成，治理批准后方可激活生产 SunLead。
+1. 双协议 verifier 和 finalized activation 状态机。〔取消〕
+2. 新旧节点混跑、错误 activation、紧急停产、回滚演练。〔取消〕
+3. 至少 30 天多地域测试网观察。〔取消；改为各组合独立起链的长稳 + 故障注入，见上位文档 §6.3〕
+
+**Gate：** 独立安全审计完成，治理批准后方可激活生产 SunLead。〔该 gate 已撤销〕
 
 ## 10. 当前结论
 
 SunLead 当前适合作为隔离 devnet 的功能原型：其确定性排程、window authoring、签名验证、双节点同步及 GRANDPA 终局已经具备验证价值。下一阶段应优先修复协议边界与运行时安全性，而非调整 window 长度或缩短 slot；后两者必须在 R3 性能数据证明安全余量后再评估。
+
+> **【2026-11-05 策略更新】** 上段"仅适合隔离 devnet 功能原型"的定性已由上位文档 §0 取代：按 genesis 组合策略，SunLead+GRANDPA（C2）已是目标形态之一，dev 与 staging 规格中 `sunleadActive: true` **不再视为与本文 §2 原则冲突的违规**（上位文档 R1），而是新链基线的既定选择。
+> **仍然成立且优先级最高**的是"优先修复协议边界与运行时安全性"——即上位文档 §3.3 的 Stage 1 硬门槛（epoch/slot/timestamp 绑定、资源治理、FindAuthor 去 BABE 化、equivocation→slashing）。window 长度与 slot 时长的优化仍按 §3.2 降级为独立优化项。

@@ -56,12 +56,13 @@ sp_api::decl_runtime_apis! {
         ) -> alloc::vec::Vec<pallet_exchange_core::types::ActionReceipt>;
     }
 
-    /// SunLead deterministic-leader consensus API (P2).
+    /// SunLead deterministic-leader consensus API (P2/P3).
     ///
     /// Exposes the epoch authority snapshot, schedule parameters and the
     /// per-slot deterministic leader / Merkle proof so the node (P3) can derive
-    /// and verify blocks. During P2 the schedule is computed by `pallet_sunlead`
-    /// at each epoch boundary; BABE/GRANDPA authoring is unchanged.
+    /// and verify blocks. The schedule is computed by `pallet_sunlead` at each
+    /// epoch boundary. `is_active` reports the genesis-selected authoring engine
+    /// (SunLead or BABE); it is fixed for the lifetime of the chain.
     pub trait SunLeadApi {
         /// Current schedule parameters.
         fn configuration() -> sunlead_primitives::SunLeadScheduleParams;
@@ -81,9 +82,15 @@ sp_api::decl_runtime_apis! {
     /// from the elected session validators, their staking exposure (stake) and the
     /// BLS keys registered via `pallet_fast_finality`. The node re-validates the
     /// proof-of-possession off-chain before trusting any key; the set returned here
-    /// is therefore only a *candidate*. SFF does NOT replace GRANDPA finality.
+    /// is therefore only a *candidate*.
+    ///
+    /// On the currently implemented genesis profile (GRANDPA finality), SFF is a
+    /// read-only shadow and does NOT replace GRANDPA finality. Selecting SFF as
+    /// the genesis finality axis (Stage 3 of the strategy doc) additionally needs
+    /// an SFF-owned set id / rotation instead of reusing GRANDPA's `CurrentSetId`,
+    /// plus real `sffb` key registration; neither is implemented yet.
     pub trait FastFinalityApi {
-        /// The current GRANDPA authority-set id, which SFF reuses as its `set_id`.
+        /// The current GRANDPA authority-set id, currently reused as SFF's `set_id`.
         fn fast_finality_current_set_id() -> u64;
         /// The candidate SFF authority set for `set_id`, or `None` if that set is
         /// not the active one or any elected validator has not yet registered a BLS

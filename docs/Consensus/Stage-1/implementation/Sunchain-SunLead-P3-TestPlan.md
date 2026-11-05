@@ -3,6 +3,12 @@
 > 目标：在真实 2 节点网络下验证 SunLead 并行共识"能出块、能同步、能终局"，并验证在 `is_active=false` 时回退到 BABE。
 > 前置：P3 代码已合入（`node/src/sunlead_consensus/` + `service.rs` 门控），`cargo check -p sunchain` 通过。
 
+> **【2026-11-05 策略回填｜上位文档：`../Stage-2/design/Sunchain-Consensus-Genesis-Composition-Strategy.md`】**
+> - **§0 "关键约束"改判**：genesis 静态门控、无运行时翻转、启动读一次 `is_active` 是**目标特性**（上位文档 §0 / R6），不再是待解决的"约束"或"已知问题"；`set_sunlead_active` 不复原，P5 动态 handoff **取消**（§备注/待办第 2 条同步作废）。
+> - **Phase 0 第 3 项"主网规格未添加该字段 → 默认 `false`，仍走 BABE"已过时**：当前 `node/src/chain_spec.rs:334-336`（dev）与 `node/src/chain_spec/initial_config.rs:377-379`（staging，被 Live 规格复用）均已 `sunleadActive: true`。按上位文档 R1，这是新链基线的既定选择（C2 组合）。
+> - **Phase 4 "回退到 BABE"仍有效**，但语义改为"构造一条 `sunleadActive=false` 的 genesis 作为 C1 对照组"，而非"在同一条链上回退/迁移"。
+> - 本文其余测试步骤与验收标准继续有效，并已纳入上位文档 §6 的 C1/C2 组合验收。
+
 ---
 
 ## 0. 关键约束（务必先读）
@@ -24,7 +30,7 @@ P3 的节点门控**在启动时读 genesis block 0 的 `is_active`**。而 runt
    - `SunLeadActive::put(self.sunlead_active)`；
    - 额外调用 `build_current_snapshot(0)` 在 genesis 把 epoch-0 的 authority 快照 + schedule 一并建好——因为 `on_initialize` 在 genesis 区块**不执行**，否则首块（block 1）的 `claim_slot` 读不到快照会死锁。错误被忽略（`let _ = ...`），BABE 在 SunLead 不激活时仍可用。
 2. `node/src/chain_spec.rs`：`development_config_genesis_json()`（即 `--chain dev`）补 `"sunLead": { "sunLeadActive": true }`，并把权威集从单 Alice 扩为 **Alice + Bob** 两个验证人，使 dev 规格支持 2 节点验证网络。
-3. 主网规格（`sunchain` preset）**未**添加该字段 → 默认 `false`，仍走 BABE。
+3. 主网规格（`sunchain` preset）**未**添加该字段 → 默认 `false`，仍走 BABE。〔**2026-11-05 更正**：此为该计划编写时状态；当前 staging patch 及复用它的 Live 规格均已置 `sunleadActive: true`，见文首策略回填。本条仅作历史记录。〕
 4. 字段名经验证：`build-spec --chain dev` 成功且 patch 中含 `sunLead/sunLeadActive`（宏自带 `deny_unknown_fields`，名字错会直接报错而非静默丢弃）。
 
 > 注意：dev 现在含 2 个验证人。单节点 `--dev`（只有 Alice 在线）时 GRANDPA 因需要 2/3 票而无法终局（仍能出块、导入），这是已知取舍；2 节点测试两节点都在线则正常终局。
@@ -100,9 +106,11 @@ cargo build --release -p sunchain        # 或 debug，取决于机器
 
 ---
 
-## Phase 4 — 回退到 BABE（对照）
+## Phase 4 — 回退到 BABE（对照）〔按 2026-11-05 策略改为 C1 对照组〕
 
-- 用**未激活**的 genesis（Phase 0 里主网默认值 `sunlead_active: false`）重复 Phase 2。
+> 语义更正：这是**构造另一条 `sunleadActive: false` 的 genesis** 作为 C1 对照链，不是在同一条链上回退/迁移。当前主网/staging 规格默认已激活，测试时需显式构造未激活 genesis。
+
+- 用**未激活**的 genesis（显式构造 `sunlead_active: false`，不再依赖"主网默认值"）重复 Phase 2。
 - 期望日志：`is_active = false`，走 `start_babe`，区块 digest 含 `bab0`，网络正常出块 + 终局。
 - 目的：证明 P3 未破坏既有 BABE/GRANDPA 路径。
 
@@ -139,5 +147,5 @@ curl -sH 'Content-Type: application/json' --data '{"id":1,"jsonrpc":"2.0",
 ## 备注 / 待办
 
 - Phase 0 的 genesis 注入是 E2E 跑通 SunLead 出块的前提；若先只验证"管线/验证器/门控编译与 BABE 回退"，可跳过 Phase 0 直接 Phase 4。
-- 真正的运行时动态 handoff（不重启切换）属 P5；本计划按 P3 静态门控设计。
-- slash 接入 `pallet-offences` 属 P4，本计划不包含。
+- ~~真正的运行时动态 handoff（不重启切换）属 P5~~ **已取消**（上位文档 §3.1）：genesis 决策、链生期不切换，静态门控是目标设计。
+- slash 接入 `pallet-offences` 仍为硬门槛（上位文档 §3.3 B4 / Stage 1），本计划不包含。

@@ -9,8 +9,11 @@
 //! in the pool) when a QC is built, so the only check here is structural sanity
 //! (plus a full BLS check for certificates). Invalid traffic is never amplified.
 //!
-//! F2 is **shadow**: nothing here changes fork choice, runtime state or user
-//! finality. The pool is only read by the observer, which logs/meters diffs.
+//! On the GRANDPA-finality genesis profile F2 is **shadow**: nothing here changes
+//! fork choice, runtime state or user finality. The pool is only read by the
+//! observer, which logs/meters diffs. This is profile-dependent (see
+//! `docs/Consensus/Stage-2/design/Sunchain-Consensus-Genesis-Composition-Strategy.md`): with SFF selected
+//! as the genesis finality axis, this protocol carries finality proofs instead.
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},

@@ -1,8 +1,11 @@
 //! # pallet-sunlead
 //!
-//! Runtime side of the **SunLead** deterministic-leader consensus (P2).
+//! Runtime side of the **SunLead** deterministic-leader consensus (P2/P3).
 //!
-//! This pallet does **not** replace BABE/GRANDPA authoring. During P2 it only:
+//! This pallet does **not** remove BABE from the runtime — BABE remains a type-
+//! level dependency and is still the authoring engine on chains that select it.
+//! It provides the runtime half of the *authoring* axis of the genesis consensus
+//! profile (see `docs/Consensus/Stage-2/design/Sunchain-Consensus-Genesis-Composition-Strategy.md`):
 //!
 //! * snapshots the active authority set (account, `sunl` key, stake) at each
 //!   session/epoch boundary,
@@ -12,7 +15,14 @@
 //! * exposes all of the above through the `SunLeadApi` runtime API.
 //!
 //! The node (P3) consumes the snapshot + params to derive the schedule and to
-//! verify each block's `sunl` digest before runtime execution.
+//! verify each block's `sunl` digest before runtime execution, and — when
+//! `SunLeadActive` is set in genesis — replaces BABE's block import / import
+//! queue / authoring worker entirely. GRANDPA finality is unaffected; selecting
+//! SFF finality is the other axis and is not implemented here.
+//!
+//! Strategy note (2026-11-05): consensus is chosen **at genesis** and never
+//! switched mid-chain. There is no activation state machine, handover or
+//! migration window; `SunLeadActive` being genesis-only is intentional.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -105,15 +115,15 @@ pub mod pallet {
 	#[pallet::storage]
 	pub type LastSession<T> = StorageValue<_, u32, ValueQuery>;
 
-	/// Whether SunLead is the active authoring consensus. While `false`, BABE
-	/// remains the block author (default). This flag is **genesis-only**: it is
-	/// set by `GenesisConfig::sunlead_active` and there is no runtime dispatch to
-	/// flip it, so the active authoring engine is fixed for the lifetime of the
-	/// chain and cannot be toggled by governance mid-flight (which would desync
-	/// node / Runtime consensus — see Remediation 4.1). The P5 activation state
-	/// machine will replace this boolean with a finalized `activation_epoch`
-	/// transition. Exposed to the node via `SunLeadApi::is_active` so the
-	/// verifier/worker can gate on it.
+	/// Which engine authors blocks on this chain. While `false`, BABE is the block
+	/// author; while `true`, SunLead is. This flag is **genesis-only**: it is set
+	/// by `GenesisConfig::sunlead_active` and there is no runtime dispatch to flip
+	/// it, so the authoring engine is fixed for the lifetime of the chain.
+	///
+	/// This is the intended design, not a placeholder: per
+	/// `docs/Consensus/Stage-2/design/Sunchain-Consensus-Genesis-Composition-Strategy.md` consensus is
+	/// chosen at genesis and there is no dynamic handover/migration. Exposed to
+	/// the node via `SunLeadApi::is_active` so the verifier/worker can gate on it.
 	#[pallet::storage]
 	pub type SunLeadActive<T> = StorageValue<_, bool, ValueQuery>;
 

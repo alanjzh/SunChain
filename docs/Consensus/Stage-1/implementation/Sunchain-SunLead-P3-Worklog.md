@@ -4,6 +4,12 @@
 > 阶段：P3（节点侧把确定性 leader 接入出块与导入管线，按 `is_active` 与 BABE 并行；BABE 仍是默认出块）
 > 前置：P1（crates/sunlead-primitives、sunlead-schedule、sunlead-verifier）、P2（pallet-sunlead + SunLeadApi + chain-spec）已完成并构建通过。
 
+> **【2026-11-05 策略回填｜上位文档：`../Stage-2/design/Sunchain-Consensus-Genesis-Composition-Strategy.md`】**
+> - **§5 "静态门控"由缺陷改判为目标特性**（上位文档 §0 / R6）：共识在 **genesis 时决策**、链生期不切换、无存量链。`is_active` 启动读一次、无运行时翻转是**正确设计**，不再列为"已知问题"，`set_sunlead_active` 不复原、P5 动态 handoff **取消**（§6 第 3 项同步作废）。
+> - **主网 preset 描述过时**：§6 第 1 项"主网 preset 不动（默认 false）"是 2026-10-27 的状态；当前 `node/src/chain_spec.rs:334-336`（dev）与 `node/src/chain_spec/initial_config.rs:377-379`（staging，并被 Live 规格复用）均已置 `sunleadActive: true`。按上位文档 R1，这不再是"违规"，而是新链基线的既定选择（C2 = SunLead+GRANDPA 已是目标组合之一）。
+> - **§6 第 3 项** "P4 slash / P5 动态 handoff" 更正：slash 闭环仍是硬门槛（上位文档 §3.3 B4，归入 Stage 1）；P5 动态 handoff **取消**。
+> - 本文其余实现记录与 E2E 结论继续有效。
+
 ---
 
 ## 0. 目标
@@ -83,7 +89,9 @@ P3 不实现 slash 接入 `pallet-offences`、不做动态 handoff 的运行时�
 
 ---
 
-## 5. 已知问题 / 重要限制
+## 5. 已知问题 / 重要限制〔2026-11-05 起改判，见文首策略回填〕
+
+> 本节标题"已知问题"按上位文档 §0 / R6 **改判**：静态 genesis 门控、无运行时翻转是目标特性，不是待修缺陷；`set_sunlead_active` 与 P5 动态 handoff 均已取消。以下保留作当时的工程记录。
 
 - **激活门槛（影响 e2e 测试）**：节点侧门控在**启动时读 genesis block 0 的 `is_active`**。而 runtime 侧 `SunLeadActive` 是 `ValueQuery`（默认 `false`），且**只能经 Root 调用 `pallet_sunlead::set_sunlead_active(true)` 翻转**。因此：
   - 若只想在运行时用 sudo 翻转，**节点不会切换**——因为节点启动时就选定了 BABE 导入队列，且读的是 genesis（重启也仍是 `false`）。
@@ -97,7 +105,7 @@ P3 不实现 slash 接入 `pallet-offences`、不做动态 handoff 的运行时�
 
 1. ~~给 `pallet-sunlead` 增加 `GenesisConfig`（或 dev chain-spec flag）预置 `SunLeadActive = true`~~ **已完成（Phase 0）**：`pallet-sunlead` 新增 `GenesisConfig { sunlead_active }`，`dev` chain-spec 置 `true` 并把权威集扩为 Alice+Bob；主网 preset 不动（默认 `false`）。同时 `build()` 里额外建了 epoch-0 快照，修复 genesis 区块不跑 `on_initialize` 导致的首块死锁。详见 `Sunchain-SunLead-P3-TestPlan.md` 的 Phase 0。
 2. 实施 `Sunchain-SunLead-P3-TestPlan.md` 中的 2 节点验证流程，覆盖：runtime API 正确性、SunLead 出块 + 双节点同步 + GRANDPA 终局性、回退到 BABE。
-3. P4：接 `pallet-offences` 实现 slash；P5：真正的共识 handoff（含动态切换）。
+3. P4：接 `pallet-offences` 实现 slash（仍为硬门槛，上位文档 §3.3 B4 / Stage 1）；~~P5：真正的共识 handoff（含动态切换）~~ **已取消**（上位文档 §3.1，genesis 决策、不动态切换）。
 
 ---
 

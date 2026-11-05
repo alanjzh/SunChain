@@ -562,7 +562,7 @@ mod tests {
 // Bounded exhaustive model checker (F1 gate: formal state-machine coverage)
 //
 // This is the *executable* half of the F1 formal model. It mirrors the TLA+
-// specification in `docs/sff-f1-formal/SFFFinality.tla`: over every small
+// specification in `docs/Consensus/Stage-1/design/sff-f1-formal/SFFFinality.tla`: over every small
 // authority committee it enumerates all quorum certificates and every reachable
 // LockTracker observer state, and asserts the safety invariants that the TLA+
 // `SafetyInv` / `LockInv` / `QuorumInv` state:

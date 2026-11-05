@@ -2,8 +2,14 @@
 
 > 基线：`Sunchain-SunLead-Remediation-Plan.md` §7
 > 状态（2026-10-28）：P1-7.1A/B 已完成并编译通过；发现并修复了"SunLead 链重启 panic"这一阻断性前置 bug（见 §0）；
-> 7.1C/D、7.2、7.3 待续。
+> 7.1C/D、7.2、7.3 待续。〔**该头部标注已过时，2026-11-05 回填见下**〕
 > 决策：用户要求先放一放 §4.2（P5 激活状态机）与 §4.3（BABE 依赖收敛），优先做 P1。
+
+> **【2026-11-05 状态回填｜上位文档：`../Stage-2/design/Sunchain-Consensus-Genesis-Composition-Strategy.md`】**
+> - **状态冲突更正**：头部"7.1C/D、7.2、7.3 待续"与本文件 §1.3/§1.4、§二、§三、§四记录的"已完成"自相矛盾。以正文为准：**7.1C/D、7.2、7.3 均已完成**（`cargo test -p sunchain` 72 passed，见 §四验收）。头部仅作历史快照保留。
+> - **§4.2 / §4.3**：不再"先放一放、待后续"。§4.2 P5 激活状态机按上位文档 §3.1 **整体取消**；§4.3 按 §3.2 **降级**为中立 slot/epoch 参数源。
+> - **§三剩余 4 类推迟指标**（schedule build 耗时、GRANDPA finality lag、空 slot 率、每 leader 成功率）：按上位文档 §3.2 降级为"随 Stage 1 顺带补齐，不单独设 gate"。
+> - **手动 sudo 验证未执行**：仍为未验证项，但在"无存量链、按新链设计"前提下不再作为上线阻塞 gate。
 
 ## 〇、前置修复：SunLead 链"复用既有 DB 重启 panic"（链级阻断 bug）
 
@@ -243,7 +249,7 @@
   - 埋点位置：`SunLeadVerifier::verify`（成功 `record_verified`，失败 `record_rejected(reason)`，
     成功后按 slot 比对 seal 检测 `record_equivocation`）；`sunlead_import_queue` 用
     `config.prometheus_registry()` 构造 `SunLeadMetrics` 并传入验证器。
-- **【本期未实现】剩余指标（已决定推迟，下一期再做）**：需 runtime / GRANDPA / worker 侧埋点，
+- **【本期未实现 / 按 2026-11-05 策略降级为 Stage 1 顺带项，不单独设 gate】剩余指标**：需 runtime / GRANDPA / worker 侧埋点，
   超出本期 node 侧范围：schedule build 耗时（在 `on_initialize` 内，需 runtime 侧计时）、GRANDPA
   finality lag（grandpa 已有现成指标）、空 slot 率、每 leader proposal/import 成功率
   （需 worker 侧埋点）。这些**不在 7.3 本期交付内**，仅作记录。

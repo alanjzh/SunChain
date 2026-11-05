@@ -2,7 +2,7 @@
 
 - **日期**：2026-10-26
 - **阶段**：P1（确定性 Leader 选举核心逻辑 — 算法 + 密码学 + 验证）
-- **参考计划**：`docs/Sunchain-SunLead-Deterministic-Leader-Development-Plan.md`
+- **参考计划**：`../design/Sunchain-SunLead-Deterministic-Leader-Development-Plan.md`
 - **状态**：P1 核心编码完成，三个 crate 全部编译通过、单元测试全绿。P0（仓库改名 / `--fresh` 清库）按用户要求**未执行**。
 
 ---

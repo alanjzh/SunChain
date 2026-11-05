@@ -1,9 +1,16 @@
 //! # pallet-fast-finality
 //!
-//! Runtime storage for the **Sunchain Fast Finality (SFF)** shadow protocol (F2).
+//! Runtime storage for the **Sunchain Fast Finality (SFF)** protocol (F2 shadow).
 //!
-//! This pallet does **not** replace BABE/GRANDPA and does **not** change chain
-//! state based on SFF certificates. During F2 it only:
+//! On chains that select GRANDPA finality at genesis (the only finality axis
+//! implemented today), this pallet does **not** change chain state based on SFF
+//! certificates — SFF is a shadow voter producing a revocable, read-only
+//! `fastConfirmed` signal. On chains that select SFF as the authoritative
+//! finality at genesis (Stage 3 of
+//! `docs/Consensus/Stage-2/design/Sunchain-Consensus-Genesis-Composition-Strategy.md`), SFF CommitQCs
+//! become the finality proof; that path is not yet implemented here.
+//!
+//! In the F2 shadow configuration it only:
 //!
 //! * stores each validator's BLS12-381 public key (G2, 96 bytes) together with
 //!   a proof-of-possession, registered by the validator's staking account;
@@ -18,8 +25,12 @@
 //! the runtime API is therefore a *candidate* set that the node re-validates.
 //!
 //! A full `sffb` session-key type (with keystore-backed secret keys and
-//! `OpaqueKeys` integration) is the production item for F3/F4; for F2 the
-//! per-account registration below is sufficient for the shadow vote path.
+//! `OpaqueKeys` integration) plus a real on-chain `register_bls_key` production
+//! flow is still required before SFF can be the authoritative finality (Stage 2
+//! of the strategy doc); for the F2 shadow path the per-account registration
+//! below is sufficient. Note that dev/staging currently injects zero-valued
+//! `sffb` keys and PoPs off-chain — that is an explicit temporary deviation
+//! that must be removed for production.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 

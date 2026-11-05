@@ -1,8 +1,17 @@
 # Sunchain：借鉴 Alpenglow 的快速最终性设计
 
-> 状态：架构提案，未批准前不得替换 BABE/GRANDPA 的共识有效性。  
+> 状态：架构提案，未批准前不得替换 BABE/GRANDPA 的共识有效性。〔该约束已于 2026-11-05 撤销，见下方策略更新〕
 > 日期：2026-10-24  
 > 目标：在不降低 Sunchain 当前安全边界的前提下，显著降低最终性延迟、降低验证人投票带宽与 CPU 开销，并为后续高性能交易执行域提供稳定的快速确认能力。
+
+> **【2026-11-05 策略更新｜上位文档：`../Stage-2/design/Sunchain-Consensus-Genesis-Composition-Strategy.md`】**
+> 项目方已决定：共识在 **genesis 时决策**、链生期不动态切换；**没有在运行的链需要升级**，按新链设计；最终形态为出块轴（BABE / SunLead）与终局轴（GRANDPA / SFF）在 genesis 任意组合、四种组合各自组网。
+> 据此重定级（详见上位文档 §3 / §8）：
+> - **取消**（§3.1）：头部"未批准前不得替换"约束；§4.6 / §6 中 F4 的**切换机制**——共识版本 digest、激活高度、双协议 handover certificate、rollback 窗口、SFF/GRANDPA 双重运行、迁移演练、"单独治理升级"式 gate；§7 的"多客户端差分测试"；F2 Gate / F3 Gate 中与迁移、下游回滚演练相关的时长与流程约束；§13 `- [ ] 10` 下游 fast-confirmed 接入（权威终局下用 `finalizedHead` 即可）。
+> - **降级**（§3.2）：§13 P2 `- [ ] 8/9`（leader/primary 聚合 + fanout、Rotor 纠删码）维持"验证人上百后才必需"，不作为 4 组合组网前置；§9 第 5 项降 slot 仍为独立 RFC。
+> - **保留为硬门槛**（§3.3）：F4 中 "**CommitQC 成为 new finality proof**" 的能力实现（justification 管线、`apply_finality`、fork choice 锁定、独立 set id、warp/light client）、§4 安全模型、§7 其余必测性质、**完整协议形式化证明 + 外部安全审计 + 故障注入**；§13 `- [ ] 11` 生产 `register_bls_key`。
+> - **F4 重新定义**：从"在运行链上 hard fork 替换 GRANDPA"改为"**genesis 选定 SFF 作为该链唯一权威终局**"（上位文档 §1.3 / Stage 3）。不需要 handover，但安全证明不可省。
+> 本文与上位文档冲突时，以上位文档为准。
 
 ## 1. 决策摘要
 
@@ -176,9 +185,11 @@ backup  = primary + 1, primary + 2, ...
 | F0/F1 shadow | 仅遥测和差分对象 | GRANDPA | 忽略 SFF |
 | F2 fast-confirmed | 可撤销快速确认 | GRANDPA | RPC 降级为 GRANDPA 状态 |
 | F3 dual-finality | 必须与 GRANDPA finalized 的祖先关系一致 | GRANDPA | 停止发 SFF confirmation |
-| F4 hard fork 后 | 新 finality proof | SFF CommitQC | 仅在形式化/审计/迁移 gate 完成后启用 |
+| F4 genesis 选定 SFF 后 | 新 finality proof | SFF CommitQC | 仅在形式化证明/外部审计 gate 完成后启用 |
 
 F0--F3 中，Runtime 不根据 SFF certificate 改变状态，不减少 GRANDPA vote，也不允许桥或 DEX 将其视为不可逆。
+
+> **【2026-11-05 策略更新】** F4 由"在已运行链上 hard fork 替换 GRANDPA"改为"**在 genesis 时选定 SFF 作为该链唯一权威终局**"：不同组合即不同 genesis、不同链，不需要 handover / 激活高度 / 双协议并行 / rollback 窗口（上位文档 §1.3、§3.1）。表中"迁移 gate"相应改为"形式化证明 + 外部审计"这一安全 gate。F0--F3 的影子语义在**终局轴选 GRANDPA** 的组合中继续成立；终局轴选 SFF 的组合中 SFF 不再是影子。
 
 ## 5. 代码落点
 
@@ -245,13 +256,16 @@ node/src/
 
 **Gate：** 下游消费者完成回滚演练；没有把 fast-confirmed 当不可逆 finality 的路径。
 
-### F4：替换权威 finality（单独治理升级）
+### F4：genesis 选定 SFF 为权威 finality〔2026-11-05 重定义〕
 
-- 仅在完整协议证明、外部审计、迁移机制、SFF/GRANDPA 双重运行结果和停机/分区演练通过后评估；
-- 引入共识版本 digest、激活高度、双协议 handover certificate、明确 rollback 窗口；
-- activation 前后的 authority set、key rotation、历史证明和 light client 验证必须可重放。
+> **【策略更新】** 原定义为"在已运行链上以单独治理升级替换权威 finality"，含迁移机制、双重运行、共识版本 digest、激活高度、handover certificate、rollback 窗口——这些**切换机制整体取消**（上位文档 §3.1：genesis 决策、无存量链、不动态切）。以下按新定义重写。
 
-**Gate：** 证明任何两个冲突 block 不可能各自得到可接受 finality proof；安全、活性与资源界限均经独立审计。
+- **能力实现（必需，Stage 3）**：SFF voter 升为 essential；CommitQC 编码为 justification 并经 `JustificationImport` 验证后 `apply_finality` 写入 `finalized_number`；fork choice 按 SFF 锁定规则；按终局轴分派 justification import / voter / warp provider，取代 `--no-grandpa` 的半残状态。
+- **配套前置（Stage 2）**：独立 authority set id 与 `sffb` 轮换（脱离 `pallet_grandpa::CurrentSetId`）、生产 `register_bls_key`、RFC 9380 hash-to-curve、接收层验票加固、SFF equivocation→slashing、SFF warp / light-client 证明（历史证明可重放）。
+- **安全 gate（不可省）**：完整协议形式化证明（活性、round/Skip/timeout、set rotation、Byzantine 调度、分区）、外部独立审计、故障注入与长稳零未解释冲突。
+- **不再需要**：handover、双协议并行、激活高度、rollback 窗口、新旧节点混跑、治理批准式切换流程、多客户端差分测试。
+
+**Gate：** 证明任何两个冲突 block 不可能各自得到可接受 finality proof；安全、活性与资源界限均经独立审计；C3（BABE+SFF）与 C4（SunLead+SFF）各自多节点组网并通过上位文档 §6 组合矩阵验收。
 
 ## 7. 必测安全性质
 
@@ -262,7 +276,7 @@ node/src/
 - 无效 certificate、超大 bitmap、重复 signer、未知 set、错误 PoP 不造成 panic、无界分配或高代价 BLS 验证；
 - SFF 超时、aggregator 拜占庭、网络分区和 vote flood 不阻断 BABE 出块或 GRANDPA 最终性；
 - F2/F3 中 SFF CommitQC 不会触发不可逆 Runtime/桥/提款逻辑；
-- F4 前必须有 model checking / TLA+ 或等价状态机证明，并结合随机长序列、Byzantine simulation 和多客户端差分测试。
+- F4 前必须有 model checking / TLA+ 或等价状态机证明，并结合随机长序列、Byzantine simulation 和多客户端差分测试。〔**2026-11-05 更正**：前三项（model checking / 随机长序列 / Byzantine simulation）**保留为硬门槛**；"多客户端差分测试"按上位文档 §3.1 降级为可选（当前仅单一客户端实现）。证明范围须从 F1 静态锁不变量扩展到活性、round/Skip/timeout、set rotation 与网络分区。〕
 
 ## 8. 风险与边界
 
@@ -312,7 +326,7 @@ F1（BLS authority snapshot 与 verifier）已实现为三个纯逻辑 / 密码�
 - [x] 固定可复现测试向量（公钥已钉入常量）。
 - [x] 负向向量覆盖重复 key、bitmap 越界、stake 溢出、set rotation、恶意 aggregate、域/会话重放、双签/冲突证据。
 - [x] 形式化状态机覆盖安全不变量（F1 gate 收尾项）：
-  - `docs/sff-f1-formal/SFFFinality.tla` + `SFFFinality.cfg`：TLA+ 规格，形式化陈述三条安全不变量 —— `SafetyInv`（同 `(height,round,phase)` 两冲突 commit 必共享 `> 1/3` stake，即任何安全破坏都需 `> 1/3` 双签，在 `< 1/3` Byzantine 假设下不可能）、`LockInv`（commit 必引用同 `(height,round,block)` 的 prepare）、`QuorumInv`（证书严格 `> 2/3`）。可用 TLC 在 `Nodes={n1..n4}`、4 节点均匀 stake、2 区块/2 高度/1 轮次下模型检验。
+  - `sff-f1-formal/SFFFinality.tla` + `SFFFinality.cfg`：TLA+ 规格，形式化陈述三条安全不变量 —— `SafetyInv`（同 `(height,round,phase)` 两冲突 commit 必共享 `> 1/3` stake，即任何安全破坏都需 `> 1/3` 双签，在 `< 1/3` Byzantine 假设下不可能）、`LockInv`（commit 必引用同 `(height,round,block)` 的 prepare）、`QuorumInv`（证书严格 `> 2/3`）。可用 TLC 在 `Nodes={n1..n4}`、4 节点均匀 stake、2 区块/2 高度/1 轮次下模型检验。
   - `crates/sff-verifier/src/lib.rs` 的 `mod model_check`：可执行的有界穷举模型检验，作为 TLA+ 不变量在真实代码上的 CI 可验证对应物。它对每个 1..5 委员会 + 多个加权 stake 配置穷举所有 `> 2/3` 法定证书与每个可达 `LockTracker` 状态（DFS 深度 4），断言：(1) **quorum-intersection 引理**——两冲突证书签名者交集 stake 严格 `> 1/3`（即 `3·inter > total`）；(2) **equivocation 完备性**——每个冲突对都被 `detect_qc_equivocation` / `detect_vote_equivocation` 捕获；(3) **锁安全**——`LockTracker` 任一层高不会记录两个不同 commit 块，且冲突 commit 必被拒。覆盖 `n∈{2..5}` 的全部投票双签组合（含 block/parent/prepare_qc 差异）。
   - 运行：`cargo test -p sff-verifier model_check`（`model_check_certificate_safety` + `model_check_vote_equivocation` 两个测试，约 0.1s 通过）。
 
@@ -619,6 +633,12 @@ GRANDPA 的 prevote/precommit 在同一轮内由消息事件直接驱动，不�
 
 - [ ] 10. 下游接入：DEX UI / 钱包显示 fast-confirmed，清算提款仍等 GRANDPA。
 - [ ] 11. 生产 `register_bls_key` 真实注册（dev 走未登记回落分支）。
+
+> **【2026-11-05 待办重定级｜上位文档 §3】** 复选框保留原始记录；实际排期按下列定级：
+> - **8 / 9（P2 规模化）→ 降级**：维持"验证人上百后才必需"的判断（`Sunchain-SFF-Gossip-Delivery-Diagnosis.md` §7），**不作为四种 genesis 组合可组网的前置**。
+> - **10（下游 fast-confirmed 接入）→ 取消**：终局轴选定 SFF 后其为权威终局，下游直接跟随 `finalizedHead`；仅当仍需对外提供 shadow 组合的 fast-confirmed 读数时保留为可选项。
+> - **11（生产 `register_bls_key`）→ 保留为硬门槛**（上位文档 §3.3 B2 / Stage 2）：连同 `sffb` 真实轮换、PoP 验证、零值占位与链外 PoP 注入的移除一并完成。
+> - **新增（本文未列，见上位文档 §3.3 / §5 Stage 3）**：SFF `JustificationImport` + `apply_finality`、fork choice 锁定、独立 set id、SFF warp/light-client、F4 级形式化证明与外部审计——这些是 C3/C4 能组网的核心缺口，优先级高于上述全部 P2 项。
 
 ### 13.4 验收标准
 

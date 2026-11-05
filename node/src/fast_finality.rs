@@ -2,12 +2,20 @@
 //! and their orchestration (design §5 `fast_finality_voter.rs`,
 //! `fast_finality_aggregator.rs`, `fast_finality_observer.rs`).
 //!
-//! **F2 is strictly shadow.** The engine produces SFF votes + certificates, but
-//! they never reach fork choice, runtime state or user finality. The only
-//! outward effect is logging / metering of how SFF's fast confirmation compares
-//! to GRANDPA's authoritative finality. Any SFF fault (timeout, bad certificate,
+//! **On the currently implemented genesis profile (GRANDPA finality), F2 is
+//! strictly shadow.** The engine produces SFF votes + certificates, but they
+//! never reach fork choice, runtime state or user finality. The only outward
+//! effect is logging / metering of how SFF's fast confirmation compares to
+//! GRANDPA's authoritative finality. Any SFF fault (timeout, bad certificate,
 //! equivocation, network split) is logged and rate-limited here — it must never
 //! interrupt BABE authoring or GRANDPA finality.
+//!
+//! This shadow property is **profile-dependent, not unconditional**: per
+//! `docs/Consensus/Stage-2/design/Sunchain-Consensus-Genesis-Composition-Strategy.md`, consensus is chosen
+//! at genesis. Selecting SFF as the finality axis (Stage 3) makes CommitQCs the
+//! authoritative finality proof; that path needs a justification-import pipeline,
+//! `apply_finality`, fork-choice locking, an SFF-owned set id and an essential
+//! voter, and is not implemented yet. Until then SFF must remain non-essential.
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -1352,9 +1360,11 @@ mod tests {
     }
 }
 
-/// Orchestrates the SFF shadow engine: drives voting + aggregation off the block
-/// import stream and a periodic tick, and runs the observer. Spawned as a
-/// non-essential task so any failure here can never stop BABE/GRANDPA.
+/// Orchestrates the SFF shadow engine (GRANDPA-finality genesis profile): drives
+/// voting + aggregation off the block import stream and a periodic tick, and runs
+/// the observer. Spawned as a non-essential task so any failure here can never
+/// stop BABE/GRANDPA. When SFF becomes the genesis-selected finality axis
+/// (strategy doc Stage 3), this task must become essential and feed finality.
 pub async fn run_fast_finality<B, C, P, S>(
     provider: Arc<P>,
     signer: Arc<S>,

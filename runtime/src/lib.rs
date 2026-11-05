@@ -458,16 +458,21 @@ mod runtime {
     #[runtime::pallet_index(25)]
     pub type Oracle = pallet_oracle;
 
-    // SunLead deterministic-leader consensus (P2): computes & exposes the epoch
-    // authority snapshot and stake-weighted schedule. Does NOT change BABE/GRANDPA
-    // authoring yet — that is P3. Registered with the next free index (26).
+    // SunLead deterministic-leader consensus (P2/P3): computes & exposes the epoch
+    // authority snapshot and stake-weighted schedule. When `SunLeadActive` is set
+    // in genesis, the node uses SunLead's import queue + authoring worker instead
+    // of BABE's (see service.rs); BABE pallet remains wired for the other genesis
+    // profile and as a type-level dependency. See
+    // docs/Consensus/Stage-2/design/Sunchain-Consensus-Genesis-Composition-Strategy.md (authoring axis).
     #[runtime::pallet_index(26)]
     pub type SunLead = pallet_sunlead;
 
-    // Sunchain Fast Finality (SFF) F2 shadow protocol: stores each validator's BLS
-    // key + proof-of-possession and exposes a candidate authority set via the
-    // `FastFinalityApi` runtime API. Does NOT change BABE/GRANDPA authoring or
-    // finality; SFF certificates are shadow-only until later phases.
+    // Sunchain Fast Finality (SFF): stores each validator's BLS key +
+    // proof-of-possession and exposes a candidate authority set via the
+    // `FastFinalityApi` runtime API. Today SFF certificates are shadow-only and
+    // GRANDPA remains the sole authoritative finality. Selecting SFF as the
+    // genesis finality axis (Stage 3 of the strategy doc) is not yet implemented;
+    // it additionally requires an independent set id, not GRANDPA's CurrentSetId.
     #[runtime::pallet_index(27)]
     pub type FastFinality = pallet_fast_finality;
 }

@@ -1065,9 +1065,15 @@ pub async fn new_full_base<N: NetworkBackend<Block, <Block as sp_runtime::traits
             });
     }
 
-    // SFF F2 shadow engine. Runs as a non-essential task: a panic or stall here
-    // must never stop BABE authoring or GRANDPA finality. The engine only
-    // produces/observes SFF votes + certificates; it changes no chain state.
+    // SFF F2 shadow engine, for the genesis profile whose finality axis is
+    // GRANDPA. It runs as a non-essential task: a panic or stall here must never
+    // stop BABE authoring or GRANDPA finality. The engine only produces/observes
+    // SFF votes + certificates; it changes no chain state.
+    //
+    // Profile-dependent (see docs/Consensus/Stage-2/design/Sunchain-Consensus-Genesis-Composition-Strategy.md):
+    // when SFF is selected as the genesis finality axis (Stage 3), its voter must
+    // instead be essential and feed justification import / apply_finality. That
+    // branch is not implemented yet; keep this non-essential until it is.
     {
         let (sff_outbound, sff_inbound) = futures::channel::mpsc::unbounded();
         let sff_pool = std::sync::Arc::new(std::sync::Mutex::new(

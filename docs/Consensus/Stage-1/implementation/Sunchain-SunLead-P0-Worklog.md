@@ -5,6 +5,12 @@
 > 决策：用户要求先放一放 P0-B 的 P5 状态机（4.2）与 BABE 依赖收敛（4.3），优先推进 P1（见
 > `Sunchain-SunLead-P1-Remediation-Worklog.md`）。4.2 / 4.3 暂不实现，待 P1 之后或单独排期。
 
+> **【2026-11-05 策略回填｜上位文档：`../Stage-2/design/Sunchain-Consensus-Genesis-Composition-Strategy.md`】**
+> - **§2.2 P5 状态机、§2.3 BABE 临时角色**：不再是"待后续/待单独排期"。按上位文档 §3.1，4.2 activation 状态机**整体取消**（genesis 决策、链生期不切换）；按 §3.2，4.3 降级为"中立 slot/epoch 参数源"（BABE 可留作兼容读取者），不再是独立 rotation/randomness beacon 的前置。
+> - **§二标题"进行中"**：改为"已完成（立即措施）；4.2 取消、4.3 降级"。头部"P0-B 已完成（立即措施）"与正文一致，此处统一。
+> - **编号澄清**：本文 §三的 "P0-D" 指 `SunLeadFindAuthor`（对应 Remediation-Plan §5.3 的 P0-C 子项），**不是** `Remediation-Plan:123-129` 的 P0-D（equivocation→slashing 闭环）。后者**至今未实现**，已列为上位文档 §3.3 B4 硬门槛，请勿因本文"P0-D 已完成"误判。
+> - §2.1 删除 `set_sunlead_active` 这一改动**继续有效且是目标特性**（genesis-only、无运行时翻转）。
+
 ## 一、P0-A：统一 epoch / slot / timestamp 语义（已完成并验证）
 
 ### 1.1 问题（致命回归）
@@ -40,7 +46,7 @@ slot - session*epoch_slots ∈ [0, epoch_slots)
   - 两节点日志**无** `Verification failed` / `banned` / `SlotOutOfRange` / `panic` /
     `equivocation`；仅剩良性 `vote rejected: Already imported` 去重噪声。
 
-## 二、P0-B：安全 activation 与 BABE 依赖收敛（进行中）
+## 二、P0-B：安全 activation 与 BABE 依赖收敛（已完成立即措施；4.2 已取消、4.3 已降级）
 
 ### 2.1 立即措施（Remediation 4.1）
 - **[已完成] 移除 `pallet-sunlead::set_sunlead_active` 运行时节点的治理翻转 call**
@@ -55,13 +61,13 @@ slot - session*epoch_slots ∈ [0, epoch_slots)
   `SUN`、独立 bootnode 与数据库 `chain_data/master`+`slave`），不与既有 BABE 链数据混用
   （Remediation 4.1 第一条）。
 
-### 2.2 P5 状态机（Remediation 4.2，待后续）
+### 2.2 P5 状态机（Remediation 4.2，已取消；以下为历史记录）
 - `Disabled → Prepared{activation_epoch, activation_parent_hash, required_node_version} →
   Active{activation_epoch, activation_block_hash} → EmergencyHaltAuthoring{reason}`。
 - 以 finalized activation epoch 取代启动期布尔分支；迁移窗口根据 parent-state activation 状态选
   择 verifier，而不是只在 genesis/read startup 时选择。
 
-### 2.3 BABE 临时角色（Remediation 4.3，待后续）
+### 2.3 BABE 临时角色（Remediation 4.3，已降级；见文首策略回填）
 - BABE 仅作为显式记录的 session rotation / randomness 依赖，不再充当隐式 author resolver
   （已由 P0-D `SunLeadFindAuthor` 完成；`SunLeadAwareOnTimestampSet` 仍从 timestamp 同步
   `Babe::CurrentSlot`）。

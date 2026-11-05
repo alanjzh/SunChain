@@ -4,7 +4,9 @@
 //! Every collection here is bounded; growth is capped, never hoped against. The
 //! pool is shared (`Arc<Mutex>`) between the network gossip (which inserts
 //! validated messages) and the voter/aggregator/observer (which read and
-//! aggregate). F2 is shadow: the pool never feeds fork choice or finality.
+//! aggregate). On the GRANDPA-finality genesis profile F2 is shadow: the pool
+//! never feeds fork choice or finality. With SFF selected as the genesis finality
+//! axis (strategy doc Stage 3), CommitQCs from this pool become finality proofs.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;

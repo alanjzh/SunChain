@@ -11,7 +11,7 @@
 //! of block production, import queues or GRANDPA. It is `no_std` so it can be
 //! compiled into the runtime WASM blob and reused by the node-side verifier.
 //!
-//! See `docs/Sunchain-SunLead-Deterministic-Leader-Development-Plan.md` for the
+//! See `docs/Consensus/Stage-1/design/Sunchain-SunLead-Deterministic-Leader-Development-Plan.md` for the
 //! protocol design. P1 (this crate + `sunlead-schedule` + `sunlead-verifier`)
 //! is pure logic and cryptography; no consensus wiring happens here.
 

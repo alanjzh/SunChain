@@ -1,8 +1,14 @@
 # Sunchain SunLead：确定性 Leader / Window 出块开发计划
 
-> 状态：开发计划提案。未经协议规格审查、测试网迁移演练与治理批准，不得替换现有 BABE 出块。  
+> 状态：开发计划提案。未经协议规格审查、测试网迁移演练与治理批准，不得替换现有 BABE 出块。〔该约束已于 2026-11-05 撤销，见下方策略更新〕
 > 日期：2026-10-25  
 > 目标：以确定性、stake 加权的 epoch leader schedule 取代 BABE 的每 slot VRF 竞争；支持同一 leader 连续负责有限个 slot（leader window）；第一阶段保持 GRANDPA 为唯一权威最终性协议。
+
+> **【2026-11-05 策略更新｜上位文档：`../Stage-2/design/Sunchain-Consensus-Genesis-Composition-Strategy.md`】**
+> 项目方已决定：共识在 **genesis 时决策**、链生期不动态切换；**没有在运行的链需要升级**，按新链设计；最终形态为出块轴（BABE / SunLead）与终局轴（GRANDPA / SFF）在 genesis 任意组合、四种组合各自组网。
+> 据此，本文中**迁移/治理类内容不再作为推进前置或工作项**：头部"未经治理批准不得替换"约束、P5 测试网迁移与 activation/回滚/混跑演练、P6 的治理批准式 gate、§7 验收中含"历史 BABE replay / activation / migration / rollback"的条目。
+> **仍然有效**（已按上位文档 §3.3 重定级为 Stage 1 硬门槛）：P0–P4 的协议边界、epoch/slot/timestamp 一致性、资源治理、FindAuthor 去 BABE 化、equivocation→slashing 闭环、P4 故障与性能矩阵。
+> 本文与上位文档冲突时，以上位文档为准。
 
 ## 1. 决策与非目标
 
@@ -344,7 +350,9 @@ V1 复用 Substrate normal block announce、sync、request-response 和 authorit
 
 **Gate：** 相对 BABE 基线，不能降低出块可用性或 GRANDPA finality；内存、CPU、网络和 PoV 不超过预算；所有错误均可观测。
 
-### P5：测试网迁移（至少 30 天）
+### P5：测试网迁移（至少 30 天）〔已取消，不再排期〕
+
+> **【策略更新】本节整体取消**：无存量链需升级，共识在 genesis 时决策、链生期不切换，故不需要迁移流程、activation 状态机、新旧节点混跑与回滚演练。以下内容保留作历史记录，不作为后续工作项或上线 gate。详见上位文档 §3.1。
 
 迁移前提：所有验证人先升级到同时理解 BABE 与 SunLead header 的 node release。由于 block import 在 Runtime 执行前判断 block 有效性，不能只依赖一次 Runtime upgrade。
 
@@ -362,9 +370,11 @@ Finality  ：GRANDPA 全程保持运行
 
 **Gate：** 连续 30 天无未解释 safety/liveness 差异；真实多地域验证人下性能优于 BABE 基线；独立安全审计通过。
 
-### P6：优化迭代（独立治理决策）
+### P6：优化迭代（独立优化项，不再是治理 gate）
 
-仅在 P5 后，按风险从低到高逐项评估：
+> **【策略更新】** 本节各项按上位文档 §3.2 降级为**独立性能优化项**，与共识组合能力解绑；去掉"仅在 P5 后""逐项测试网运行和治理批准"等迁移式 gate。其中第 6 项"替换 GRANDPA finality"改由上位文档 Stage 2/3 承接（SFF 作为 genesis 选定的权威终局），但**安全证明与外部审计仍是硬门槛**。
+
+按风险从低到高逐项评估：
 
 1. window 从 2 slots 调至 3--4 slots；
 2. 3 秒 slot 降至 2 秒；
@@ -376,6 +386,11 @@ Finality  ：GRANDPA 全程保持运行
 任何一步都必须单独 benchmark、测试网运行和治理批准；slot duration 不能在已启动链上作为普通参数直接修改。
 
 ## 7. 验收指标
+
+> **【策略更新】** 按上位文档 §3.3 / §6，本节的**正确性与故障类**指标仍然有效（已归入 Stage 1 / Stage 3 的组合矩阵验收）；下列两条因"无存量链、无迁移"而**不再适用**：
+> - 正确性：`历史 BABE 与 activation 后 SunLead block 都可 replay`（无 activation 过渡，每条链自 genesis 起单一共识）；
+> - 运营：`migration、rollback、…节点升级演练通过`（按新链模型改为"各组合独立起链、重启恢复、故障注入"验收）。
+> 下表复选框保留原样以记录原始验收设计；排期以上位文档 §6 组合矩阵为准。
 
 ### 正确性
 
