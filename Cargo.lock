@@ -4991,6 +4991,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "exchange-engine"
+version = "0.1.0"
+dependencies = [
+ "exchange-primitives",
+ "parity-scale-codec",
+ "scale-info",
+ "sp-core 37.0.0",
+]
+
+[[package]]
 name = "exit-future"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
